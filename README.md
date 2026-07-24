@@ -179,7 +179,7 @@ base_url = "https://api.z.ai/api/paas/v4/chat/completions"
 max_tokens = 4096
 ```
 
-**Anthropic-compatible** (exercises the SSE streaming code path):
+**Anthropic-compatible** (uses the native Anthropic Messages API):
 
 ```toml
 provider = "anthropic"

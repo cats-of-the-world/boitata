@@ -63,10 +63,13 @@ impl Config {
 
     /// The API key to use: `BOITATA_API_KEY` if set, otherwise the file value.
     pub fn resolve_api_key(&self) -> Option<String> {
+        // Treat a blank key (common in the committed template) as absent so the
+        // caller surfaces the actionable "requires an api_key" error rather than
+        // sending an empty `Authorization` header and getting a confusing 401.
         std::env::var(API_KEY_ENV)
             .ok()
-            .filter(|k| !k.is_empty())
             .or_else(|| self.api_key.clone())
+            .filter(|k| !k.is_empty())
     }
 }
 

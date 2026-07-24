@@ -253,7 +253,10 @@ fn parse_openai_error(status: u16, body: &str) -> ProviderError {
 struct OpenAIRequest {
     model: String,
     messages: Vec<OpenAIMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // OpenAI deprecated `max_tokens`; current models (including the o-series
+    // reasoning models, which reject `max_tokens` outright) expect
+    // `max_completion_tokens`. Most OpenAI-compatible proxies accept it too.
+    #[serde(rename = "max_completion_tokens", skip_serializing_if = "Option::is_none")]
     max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,

@@ -31,7 +31,7 @@ max_tokens = 4096
 
 # --- Alternatives -----------------------------------------------------------
 #
-# z.ai Anthropic-compatible endpoint (exercises the streaming code path):
+# z.ai Anthropic-compatible endpoint (native Anthropic Messages API):
 #   provider = "anthropic"
 #   model    = "glm-4.6"
 #   base_url = "https://api.z.ai/api/anthropic/v1/messages"
