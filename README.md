@@ -110,7 +110,7 @@ Planned support for the Model Context Protocol to connect to external tools and 
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/boitata.git
+git clone https://github.com/cats-of-the-world/boitata.git
 cd boitata
 
 # Build
@@ -181,5 +181,4 @@ MIT License - see LICENSE file for details.
 
 - **Stripe's Minions** - For the blueprint architecture and determinism-first philosophy
 - **Block's Goose** - For the modular Rust architecture and MCP integration patterns
-- **Anthropic** - For the Claude API and Model Context Protocol
 
