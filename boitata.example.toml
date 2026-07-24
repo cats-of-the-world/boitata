@@ -1,0 +1,42 @@
+# Boitata configuration template.
+#
+# Copy this file to `boitata.toml` (which is git-ignored) and fill in your
+# credentials. You can also leave `api_key` blank and export the key instead:
+#
+#     export BOITATA_API_KEY="your-key"
+#
+# By default the CLI looks for `boitata.toml` in the current directory. Override
+# with `--config <path>` or the `BOITATA_CONFIG` environment variable.
+
+# Provider to use: "anthropic", "openai", or "ollama".
+provider = "openai"
+
+# Model identifier passed to the provider.
+model = "glm-4.6"
+
+# API key. Prefer the BOITATA_API_KEY env var for real secrets.
+api_key = ""
+
+# Override the provider's default endpoint. For z.ai's OpenAI-compatible API:
+base_url = "https://api.z.ai/api/paas/v4/chat/completions"
+
+# Output token budget per request (optional; defaults to 4096).
+max_tokens = 4096
+
+# Maximum agent iterations before giving up (optional; defaults to 50).
+# max_iterations = 50
+
+# Custom system prompt (optional; a sensible default is used otherwise).
+# system_prompt = "You are a helpful coding agent."
+
+# --- Alternatives -----------------------------------------------------------
+#
+# z.ai Anthropic-compatible endpoint (native Anthropic Messages API):
+#   provider = "anthropic"
+#   model    = "glm-4.6"
+#   base_url = "https://api.z.ai/api/anthropic/v1/messages"
+#
+# Local Ollama (no API key needed):
+#   provider = "ollama"
+#   model    = "llama3.2"
+#   base_url = "http://localhost:11434"

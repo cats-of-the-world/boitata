@@ -157,6 +157,32 @@ pub enum ProviderError {
     Other(String),
 }
 
+/// Deliver a non-streaming [`CompletionResponse`] as a single-item stream.
+///
+/// Providers without true SSE streaming reuse this to satisfy the
+/// [`Provider::stream_complete`] contract by emitting one aggregated [`Chunk`].
+pub fn single_chunk_stream(
+    response: CompletionResponse,
+) -> tokio_stream::wrappers::ReceiverStream<Result<Chunk>> {
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+    let chunk = Chunk {
+        content: response.content,
+        tool_calls: if response.tool_calls.is_empty() {
+            None
+        } else {
+            Some(response.tool_calls)
+        },
+        finish_reason: response.finish_reason,
+    };
+
+    // Capacity is 1 and we send exactly one item before dropping the sender, so
+    // this never blocks and the receiver observes the chunk followed by close.
+    let _ = tx.try_send(Ok(chunk));
+
+    tokio_stream::wrappers::ReceiverStream::new(rx)
+}
+
 /// Result type for provider operations
 pub type Result<T> = std::result::Result<T, ProviderError>;
 

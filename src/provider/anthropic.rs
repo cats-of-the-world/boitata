@@ -13,6 +13,7 @@ use super::{
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 /// Value for the required `anthropic-version` request header.
@@ -139,25 +140,160 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompletionRequest,
     ) -> ProviderResult<ReceiverStream<ProviderResult<Chunk>>> {
-        // For now, return a non-streaming response wrapped in a stream
-        // TODO: Implement true streaming
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let mut anthropic_request = self.build_request(request);
+        anthropic_request.stream = true;
 
-        let response = self.complete(request).await?;
-
-        let chunk = Chunk {
-            content: response.content,
-            tool_calls: if response.tool_calls.is_empty() {
-                None
-            } else {
-                Some(response.tool_calls)
-            },
-            finish_reason: response.finish_reason,
-        };
-
-        tx.send(Ok(chunk))
+        // POST /v1/messages with `stream: true`; the body is a sequence of SSE
+        // events. See https://docs.claude.com/en/docs/build-with-claude/streaming
+        let response = self
+            .client
+            .post(&self.base_url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
+            .header("content-type", "application/json")
+            .json(&anthropic_request)
+            .send()
             .await
-            .map_err(|e| ProviderError::Other(e.to_string()))?;
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            return Err(parse_anthropic_error(status.as_u16(), &body));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let mut byte_stream = Box::pin(response.bytes_stream());
+            // Accumulate raw bytes: a network chunk can split both an SSE line
+            // and a multi-byte UTF-8 character, so we buffer bytes and only
+            // decode once we hold a complete line.
+            let mut buffer: Vec<u8> = Vec::new();
+            // A tool_use block streams its input incrementally: (id, name, partial JSON).
+            let mut current_tool: Option<(String, String, String)> = None;
+
+            while let Some(item) = byte_stream.next().await {
+                let bytes = match item {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(ProviderError::RequestFailed(e.to_string())))
+                            .await;
+                        return;
+                    }
+                };
+                buffer.extend_from_slice(&bytes);
+
+                while let Some(newline) = buffer.iter().position(|&b| b == b'\n') {
+                    // A full line (with all its bytes) is now buffered, so any
+                    // multi-byte character within it is complete.
+                    let line_bytes: Vec<u8> = buffer.drain(..=newline).collect();
+                    let line = String::from_utf8_lossy(&line_bytes);
+                    let line = line.trim();
+                    let Some(data) = line.strip_prefix("data:") else {
+                        continue;
+                    };
+                    let data = data.trim();
+                    if data.is_empty() {
+                        continue;
+                    }
+                    let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+                        continue;
+                    };
+
+                    match event.get("type").and_then(|t| t.as_str()) {
+                        Some("content_block_start") => {
+                            let cb = &event["content_block"];
+                            if cb.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                                let id = cb
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let name = cb
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                current_tool = Some((id, name, String::new()));
+                            }
+                        }
+                        Some("content_block_delta") => {
+                            let delta = &event["delta"];
+                            match delta.get("type").and_then(|t| t.as_str()) {
+                                Some("text_delta") => {
+                                    if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                                        let chunk = Chunk {
+                                            content: Some(text.to_string()),
+                                            tool_calls: None,
+                                            finish_reason: None,
+                                        };
+                                        if tx.send(Ok(chunk)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                                Some("input_json_delta") => {
+                                    if let (Some(tool), Some(partial)) = (
+                                        current_tool.as_mut(),
+                                        delta.get("partial_json").and_then(|v| v.as_str()),
+                                    ) {
+                                        tool.2.push_str(partial);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some("content_block_stop") => {
+                            if let Some((id, name, json)) = current_tool.take() {
+                                let arguments = serde_json::from_str(&json)
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+                                let chunk = Chunk {
+                                    content: None,
+                                    tool_calls: Some(vec![ToolCall {
+                                        id,
+                                        name,
+                                        arguments,
+                                    }]),
+                                    finish_reason: None,
+                                };
+                                if tx.send(Ok(chunk)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Some("message_delta") => {
+                            if let Some(reason) =
+                                event["delta"].get("stop_reason").and_then(|v| v.as_str())
+                            {
+                                let chunk = Chunk {
+                                    content: None,
+                                    tool_calls: None,
+                                    finish_reason: Some(reason.to_string()),
+                                };
+                                if tx.send(Ok(chunk)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Some("message_stop") => return,
+                        Some("error") => {
+                            let msg = event["error"]["message"]
+                                .as_str()
+                                .unwrap_or("stream error")
+                                .to_string();
+                            let _ = tx.send(Err(ProviderError::RequestFailed(msg))).await;
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
 
         Ok(ReceiverStream::new(rx))
     }
@@ -176,7 +312,6 @@ struct AnthropicRequest {
     max_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
-    #[serde(skip_serializing)]
     stream: bool,
 }
 
