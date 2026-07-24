@@ -1,12 +1,12 @@
 // Provider module: LLM provider abstraction
 
 pub mod anthropic;
-pub mod openai;
 pub mod ollama;
+pub mod openai;
 
 pub use anthropic::AnthropicProvider;
-pub use openai::OpenAIProvider;
 pub use ollama::OllamaProvider;
+pub use openai::OpenAIProvider;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -203,7 +203,10 @@ pub struct ProviderRegistry {
 impl std::fmt::Debug for ProviderRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderRegistry")
-            .field("providers", &self.providers.iter().map(|p| p.name()).collect::<Vec<_>>())
+            .field(
+                "providers",
+                &self.providers.iter().map(|p| p.name()).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -220,10 +223,7 @@ impl ProviderRegistry {
     }
 
     pub fn get_by_name(&self, name: &str) -> Option<std::sync::Arc<dyn Provider>> {
-        self.providers
-            .iter()
-            .find(|p| p.name() == name)
-            .cloned()
+        self.providers.iter().find(|p| p.name() == name).cloned()
     }
 
     pub fn get_default(&self) -> Option<std::sync::Arc<dyn Provider>> {

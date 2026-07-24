@@ -49,7 +49,9 @@ impl Provider for OllamaProvider {
 
     async fn complete(&self, _request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         // TODO: Implement Ollama API call
-        Err(ProviderError::Other("Ollama provider not yet implemented".to_string()))
+        Err(ProviderError::Other(
+            "Ollama provider not yet implemented".to_string(),
+        ))
     }
 
     async fn stream_complete(
@@ -57,7 +59,9 @@ impl Provider for OllamaProvider {
         _request: CompletionRequest,
     ) -> ProviderResult<tokio_stream::wrappers::ReceiverStream<ProviderResult<super::Chunk>>> {
         // TODO: Implement Ollama streaming
-        Err(ProviderError::Other("Ollama streaming not yet implemented".to_string()))
+        Err(ProviderError::Other(
+            "Ollama streaming not yet implemented".to_string(),
+        ))
     }
 }
 

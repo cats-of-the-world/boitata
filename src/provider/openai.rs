@@ -24,9 +24,8 @@ impl OpenAIProvider {
             api_key,
             model,
             max_tokens: 128_000,
-            base_url: base_url.unwrap_or_else(|| {
-                "https://api.openai.com/v1/chat/completions".to_string()
-            }),
+            base_url: base_url
+                .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string()),
         }
     }
 
@@ -53,7 +52,9 @@ impl Provider for OpenAIProvider {
 
     async fn complete(&self, _request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         // TODO: Implement OpenAI API call
-        Err(ProviderError::Other("OpenAI provider not yet implemented".to_string()))
+        Err(ProviderError::Other(
+            "OpenAI provider not yet implemented".to_string(),
+        ))
     }
 
     async fn stream_complete(
@@ -61,7 +62,9 @@ impl Provider for OpenAIProvider {
         _request: CompletionRequest,
     ) -> ProviderResult<tokio_stream::wrappers::ReceiverStream<ProviderResult<super::Chunk>>> {
         // TODO: Implement OpenAI streaming
-        Err(ProviderError::Other("OpenAI streaming not yet implemented".to_string()))
+        Err(ProviderError::Other(
+            "OpenAI streaming not yet implemented".to_string(),
+        ))
     }
 }
 

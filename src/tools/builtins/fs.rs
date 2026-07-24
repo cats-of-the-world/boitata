@@ -1,6 +1,6 @@
 // File system tools
 
-use crate::tools::{Tool, ToolError, Result};
+use crate::tools::{Result, Tool, ToolError};
 use async_trait::async_trait;
 use std::fs;
 
@@ -96,7 +96,11 @@ impl Tool for FileWriteTool {
         fs::write(path, content)
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to write file: {}", e)))?;
 
-        Ok(format!("Successfully wrote {} bytes to {}", content.len(), path))
+        Ok(format!(
+            "Successfully wrote {} bytes to {}",
+            content.len(),
+            path
+        ))
     }
 }
 
@@ -140,13 +144,14 @@ impl Tool for ListDirectoryTool {
 
         let mut result = Vec::new();
         for entry in entries {
-            let entry = entry
-                .map_err(|e| ToolError::ExecutionFailed(format!("failed to read directory entry: {}", e)))?;
+            let entry = entry.map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to read directory entry: {}", e))
+            })?;
 
             let name = entry.file_name().to_string_lossy().to_string();
-            let metadata = entry
-                .metadata()
-                .map_err(|e| ToolError::ExecutionFailed(format!("failed to read metadata: {}", e)))?;
+            let metadata = entry.metadata().map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to read metadata: {}", e))
+            })?;
 
             let file_type = if metadata.is_dir() {
                 "DIR"

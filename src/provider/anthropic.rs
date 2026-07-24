@@ -1,14 +1,13 @@
 // Anthropic Claude provider implementation
 
 use super::{
-    Chunk, CompletionRequest, CompletionResponse, Message, MessageContent, MessageRole,
-    Provider, ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage,
+    Chunk, CompletionRequest, CompletionResponse, MessageContent, MessageRole, Provider,
+    ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage,
 };
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::Stream;
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
@@ -36,9 +35,8 @@ impl AnthropicProvider {
             model,
             // Output (generation) token budget, not the context window size.
             max_tokens: 8192,
-            base_url: base_url.unwrap_or_else(|| {
-                "https://api.anthropic.com/v1/messages".to_string()
-            }),
+            base_url: base_url
+                .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string()),
         }
     }
 
@@ -265,7 +263,10 @@ enum AnthropicResponseContent {
         input: serde_json::Value,
     },
     #[serde(rename = "tool_result")]
-    ToolResult { tool_use_id: String, content: String },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,7 +333,9 @@ fn parse_anthropic_error(status: u16, body: &str) -> ProviderError {
                     {
                         return ProviderError::ContextLengthExceeded;
                     }
-                    if err.error.message.contains("model") && err.error.message.contains("not found") {
+                    if err.error.message.contains("model")
+                        && err.error.message.contains("not found")
+                    {
                         return ProviderError::ModelNotFound(err.error.message);
                     }
                 }
@@ -360,7 +363,10 @@ mod tests {
 
     #[test]
     fn test_provider_creation() {
-        let provider = AnthropicProvider::new("test-key".to_string(), "claude-3-7-sonnet-20250219".to_string());
+        let provider = AnthropicProvider::new(
+            "test-key".to_string(),
+            "claude-3-7-sonnet-20250219".to_string(),
+        );
         assert_eq!(provider.name(), "anthropic");
         assert_eq!(provider.model(), "claude-3-7-sonnet-20250219");
         assert!(provider.supports_tools());

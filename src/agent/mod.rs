@@ -104,13 +104,11 @@ impl Agent {
             let request = self.build_request(&context)?;
 
             // Call the provider
-            let response = self.provider.complete(request).await.map_err(|e| {
-                match e {
-                    ProviderError::ContextLengthExceeded => {
-                        anyhow::anyhow!("Context length exceeded - task too complex")
-                    }
-                    _ => anyhow::anyhow!("Provider error: {}", e),
+            let response = self.provider.complete(request).await.map_err(|e| match e {
+                ProviderError::ContextLengthExceeded => {
+                    anyhow::anyhow!("Context length exceeded - task too complex")
                 }
+                _ => anyhow::anyhow!("Provider error: {}", e),
             })?;
 
             // Handle the response
@@ -152,7 +150,10 @@ impl Agent {
         }
 
         // Max iterations reached
-        warn!("Max iterations ({}) reached without completion", max_iterations);
+        warn!(
+            "Max iterations ({}) reached without completion",
+            max_iterations
+        );
         Ok(TaskResult {
             success: false,
             final_message: None,
