@@ -132,7 +132,9 @@ async fn run_task(
             Some(Arc::new(audit))
         }
         Err(e) => {
-            tracing::warn!("failed to open audit log `{audit_path}`: {e}; continuing without audit");
+            tracing::warn!(
+                "failed to open audit log `{audit_path}`: {e}; continuing without audit"
+            );
             None
         }
     };
