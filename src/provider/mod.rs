@@ -52,6 +52,13 @@ pub enum MessageRole {
 pub enum MessageContent {
     Text(String),
     ToolResults(Vec<ToolResult>),
+    /// An assistant turn that issued tool calls (with optional accompanying text).
+    /// This must be preserved in the conversation so that the tool results which
+    /// follow have a matching `tool_use` block to reference.
+    ToolUse {
+        text: Option<String>,
+        tool_calls: Vec<ToolCall>,
+    },
 }
 
 impl From<String> for MessageContent {
@@ -170,9 +177,11 @@ pub trait Provider: Send + Sync {
         true
     }
 
-    /// Get the maximum tokens for this provider/model
+    /// Get the maximum number of *output* tokens to request for this
+    /// provider/model. This is the generation budget sent to the API, not the
+    /// size of the context window.
     fn max_tokens(&self) -> usize {
-        200_000
+        8192
     }
 
     /// Complete a request (non-streaming)

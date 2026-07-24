@@ -34,7 +34,8 @@ impl AnthropicProvider {
             client: Client::new(),
             api_key,
             model,
-            max_tokens: 200_000,
+            // Output (generation) token budget, not the context window size.
+            max_tokens: 8192,
             base_url: base_url.unwrap_or_else(|| {
                 "https://api.anthropic.com/v1/messages".to_string()
             }),
@@ -173,7 +174,11 @@ struct AnthropicRequest {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum AnthropicContent {
-    Text { text: String },
+    Text {
+        #[serde(rename = "type")]
+        content_type: String,
+        text: String,
+    },
     ToolUse {
         #[serde(rename = "type")]
         content_type: String,
@@ -201,7 +206,10 @@ struct AnthropicMessage {
 impl From<MessageContent> for Vec<AnthropicContent> {
     fn from(content: MessageContent) -> Self {
         match content {
-            MessageContent::Text(text) => vec![AnthropicContent::Text { text }],
+            MessageContent::Text(text) => vec![AnthropicContent::Text {
+                content_type: "text".to_string(),
+                text,
+            }],
             MessageContent::ToolResults(results) => results
                 .into_iter()
                 .map(|r| AnthropicContent::ToolResult {
@@ -211,6 +219,26 @@ impl From<MessageContent> for Vec<AnthropicContent> {
                     is_error: r.is_error,
                 })
                 .collect(),
+            MessageContent::ToolUse { text, tool_calls } => {
+                let mut blocks = Vec::new();
+                if let Some(text) = text {
+                    if !text.is_empty() {
+                        blocks.push(AnthropicContent::Text {
+                            content_type: "text".to_string(),
+                            text,
+                        });
+                    }
+                }
+                for call in tool_calls {
+                    blocks.push(AnthropicContent::ToolUse {
+                        content_type: "tool_use".to_string(),
+                        id: call.id,
+                        name: call.name,
+                        input: call.arguments,
+                    });
+                }
+                blocks
+            }
         }
     }
 }
@@ -298,10 +326,8 @@ fn parse_anthropic_error(status: u16, body: &str) -> ProviderError {
         if let Ok(err) = serde_json::from_str::<AnthropicErrorResponse>(body) {
             if let Some(t) = err.error.type_ {
                 if t == "invalid_request_error" {
-                    if err
-                        .error
-                        .message
-                        .contains("context_length_exceeded")
+                    if err.error.message.contains("prompt is too long")
+                        || err.error.message.contains("context_length_exceeded")
                         || err.error.message.contains("context window")
                     {
                         return ProviderError::ContextLengthExceeded;

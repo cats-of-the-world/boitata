@@ -126,6 +126,10 @@ impl Agent {
                 });
             }
 
+            // Record the assistant turn (text + tool_use blocks) before the tool
+            // results, so each tool_result references a matching tool_use.
+            context.add_assistant_tool_use(response.content.clone(), response.tool_calls.clone());
+
             // Execute tool calls
             for tool_call in &response.tool_calls {
                 debug!("Executing tool: {}", tool_call.name);

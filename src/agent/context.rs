@@ -1,6 +1,6 @@
 // Context management for agent conversations
 
-use crate::provider::{Message, MessageContent, MessageRole, ToolResult};
+use crate::provider::{Message, MessageContent, MessageRole, ToolCall, ToolResult};
 
 /// Conversation context
 #[derive(Debug, Clone)]
@@ -19,6 +19,11 @@ struct ContextMessage {
 enum ContextContent {
     Text(String),
     ToolResults(Vec<ToolResult>),
+    /// An assistant turn that requested tool calls, with any accompanying text.
+    ToolUse {
+        text: Option<String>,
+        tool_calls: Vec<ToolCall>,
+    },
 }
 
 impl Context {
@@ -48,6 +53,16 @@ impl Context {
         self.messages.push(ContextMessage {
             role: MessageRole::Assistant,
             content: ContextContent::Text(content.to_string()),
+        });
+    }
+
+    /// Record an assistant turn that requested tool calls, along with any text
+    /// the assistant produced. This must be added before the corresponding tool
+    /// results so the provider sees a matching `tool_use` for each result.
+    pub fn add_assistant_tool_use(&mut self, text: Option<String>, tool_calls: Vec<ToolCall>) {
+        self.messages.push(ContextMessage {
+            role: MessageRole::Assistant,
+            content: ContextContent::ToolUse { text, tool_calls },
         });
     }
 
@@ -97,6 +112,10 @@ impl Context {
                     ContextContent::ToolResults(results) => {
                         MessageContent::ToolResults(results.clone())
                     }
+                    ContextContent::ToolUse { text, tool_calls } => MessageContent::ToolUse {
+                        text: text.clone(),
+                        tool_calls: tool_calls.clone(),
+                    },
                 },
             })
             .collect()
