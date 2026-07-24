@@ -2,3 +2,7 @@
 
 # Local config with credentials — never commit
 boitata.toml
+
+# Runtime audit logs
+boitata-audit.log
+*-audit.log

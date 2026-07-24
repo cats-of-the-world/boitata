@@ -3,11 +3,13 @@
 
 // Declare modules
 mod agent;
+mod audit;
 mod config;
 mod context;
 mod provider;
 mod tools;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
@@ -15,12 +17,15 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 
 use agent::{Agent, Task};
+use audit::FileAuditLog;
 use config::Config;
 use provider::{AnthropicProvider, OllamaProvider, OpenAIProvider, Provider};
 use tools::{FileReadTool, FileWriteTool, ListDirectoryTool, ToolRegistry};
 
 /// Fallback output-token budget when the config doesn't set `max_tokens`.
 const DEFAULT_MAX_TOKENS: usize = 4096;
+/// Default audit log path when the config doesn't set `audit_log`.
+const DEFAULT_AUDIT_LOG: &str = "boitata-audit.log";
 
 #[derive(Parser)]
 #[command(name = "boitata")]
@@ -113,13 +118,23 @@ async fn run_task(
 
     let provider = build_provider(&config)?;
 
+    // Set up the audit log for this run.
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let audit_path = config
+        .audit_log
+        .clone()
+        .unwrap_or_else(|| DEFAULT_AUDIT_LOG.to_string());
+    let audit = FileAuditLog::open(Path::new(&audit_path), run_id.clone())
+        .with_context(|| format!("failed to open audit log `{audit_path}`"))?;
+    info!("Audit log: {audit_path} (run_id={run_id})");
+
     // Register the deterministic built-in tools the agent can call.
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(FileReadTool));
     tools.register(Arc::new(FileWriteTool));
     tools.register(Arc::new(ListDirectoryTool));
 
-    let mut agent = Agent::new(provider, tools);
+    let mut agent = Agent::new(provider, tools).with_audit(Arc::new(audit));
     if let Some(prompt) = config.system_prompt.clone() {
         agent = agent.with_system_prompt(prompt);
     }

@@ -37,6 +37,9 @@ pub struct Config {
     /// Optional custom system prompt for the agent.
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Path to the JSONL audit log (optional; defaults to `boitata-audit.log`).
+    #[serde(default)]
+    pub audit_log: Option<String>,
 }
 
 impl Config {

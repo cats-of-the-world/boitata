@@ -1,0 +1,187 @@
+// Audit logging for agent runs.
+//
+// Every run emits a stream of structured events (one JSON object per line) so we
+// can reconstruct exactly what happened: which model was called, what tool calls
+// were made, token usage, and the final outcome. JSONL keeps the log
+// human-readable now and trivially loadable into a database later.
+//
+// Audit failures never abort a run — a write error is logged via `tracing` and
+// swallowed, because losing the log is preferable to killing an unattended task.
+//
+// Secrets are never recorded here: the API key is deliberately excluded from
+// every event (only provider/model/base_url-level metadata is captured upstream).
+
+use chrono::Utc;
+use serde::Serialize;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
+use std::sync::Mutex;
+
+/// Maximum length for a single string field before it's truncated in the log.
+const MAX_FIELD_LEN: usize = 4096;
+
+/// A sink that records audit events. Implementors must be cheap to call and must
+/// not panic — audit is best-effort and must never break a run.
+pub trait AuditSink: Send + Sync {
+    fn record(&self, event: AuditEvent);
+}
+
+/// One line in the audit log: run/timestamp envelope plus a typed event.
+#[derive(Debug, Clone, Serialize)]
+struct AuditRecord {
+    run_id: String,
+    /// RFC 3339 timestamp (UTC).
+    timestamp: String,
+    #[serde(flatten)]
+    event: AuditEvent,
+}
+
+/// A single auditable moment in an agent run.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum AuditEvent {
+    /// A run began.
+    RunStarted {
+        task: String,
+        provider: String,
+        model: String,
+    },
+    /// The provider returned a completion for one iteration.
+    LlmResponse {
+        iteration: usize,
+        /// Whether the assistant produced any text (vs. tool calls only).
+        has_text: bool,
+        /// Names of the tools the assistant asked to call this turn.
+        tool_calls: Vec<String>,
+        input_tokens: Option<usize>,
+        output_tokens: Option<usize>,
+    },
+    /// A tool was executed and produced a result.
+    ToolCall {
+        iteration: usize,
+        name: String,
+        arguments: String,
+        result: String,
+        is_error: bool,
+    },
+    /// The run finished (successfully or not).
+    RunCompleted {
+        success: bool,
+        iterations: usize,
+        error: Option<String>,
+        total_input_tokens: usize,
+        total_output_tokens: usize,
+    },
+}
+
+/// An [`AuditSink`] that appends JSON lines to a file.
+pub struct FileAuditLog {
+    run_id: String,
+    file: Mutex<std::fs::File>,
+}
+
+impl FileAuditLog {
+    /// Open (or create) the audit log at `path` in append mode, tagging every
+    /// event with `run_id`.
+    pub fn open(path: &Path, run_id: String) -> std::io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            run_id,
+            file: Mutex::new(file),
+        })
+    }
+}
+
+impl AuditSink for FileAuditLog {
+    fn record(&self, event: AuditEvent) {
+        let record = AuditRecord {
+            run_id: self.run_id.clone(),
+            timestamp: Utc::now().to_rfc3339(),
+            event,
+        };
+
+        let line = match serde_json::to_string(&record) {
+            Ok(line) => line,
+            Err(e) => {
+                tracing::warn!("failed to serialize audit event: {e}");
+                return;
+            }
+        };
+
+        match self.file.lock() {
+            Ok(mut file) => {
+                if let Err(e) = writeln!(file, "{line}") {
+                    tracing::warn!("failed to write audit event: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("audit log mutex poisoned: {e}"),
+        }
+    }
+}
+
+/// Truncate a string to a bounded length for logging, noting how much was cut.
+pub fn truncate_for_log(s: &str) -> String {
+    if s.len() <= MAX_FIELD_LEN {
+        return s.to_string();
+    }
+    // Truncate on a char boundary at or below the limit.
+    let mut end = MAX_FIELD_LEN;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… ({} more bytes truncated)", &s[..end], s.len() - end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_event_serializes_with_tag() {
+        let record = AuditRecord {
+            run_id: "run-1".to_string(),
+            timestamp: "2026-07-24T00:00:00+00:00".to_string(),
+            event: AuditEvent::RunStarted {
+                task: "hi".to_string(),
+                provider: "openai".to_string(),
+                model: "glm-4.6".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains(r#""event":"run_started""#));
+        assert!(json.contains(r#""run_id":"run-1""#));
+        assert!(json.contains(r#""provider":"openai""#));
+    }
+
+    #[test]
+    fn test_truncate_short_string_unchanged() {
+        assert_eq!(truncate_for_log("hello"), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long_string() {
+        let long = "a".repeat(MAX_FIELD_LEN + 100);
+        let out = truncate_for_log(&long);
+        assert!(out.contains("more bytes truncated"));
+        assert!(out.len() < long.len());
+    }
+
+    #[test]
+    fn test_file_audit_log_writes_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let log = FileAuditLog::open(&path, "run-x".to_string()).unwrap();
+        log.record(AuditEvent::RunCompleted {
+            success: true,
+            iterations: 2,
+            error: None,
+            total_input_tokens: 10,
+            total_output_tokens: 5,
+        });
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        assert!(contents.contains(r#""event":"run_completed""#));
+        assert!(contents.contains(r#""run_id":"run-x""#));
+    }
+}

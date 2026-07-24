@@ -165,6 +165,28 @@ cargo build --release
 The agent loops over LLM calls and tool executions until the task is done, then
 prints the tool calls it made and a final summary.
 
+### Audit log
+
+Every run appends structured events to a JSONL audit log (default
+`boitata-audit.log`, configurable via `audit_log` in the config file). Each line
+is one JSON object tagged with a per-run `run_id` and an RFC 3339 timestamp, so
+you can reconstruct exactly what happened — including failures on unattended
+runs. The log is git-ignored and never contains your API key.
+
+Event types: `run_started`, `llm_response` (with token usage), `tool_call`
+(with arguments and result), and `run_completed` (success/error + token totals).
+
+```jsonl
+{"run_id":"c880…","timestamp":"2026-07-24T09:04:08+00:00","event":"run_started","task":"hello world","provider":"ollama","model":"llama3.2"}
+{"run_id":"c880…","timestamp":"2026-07-24T09:04:08+00:00","event":"run_completed","success":false,"iterations":1,"error":"Provider error: …connection refused…","total_input_tokens":0,"total_output_tokens":0}
+```
+
+Pretty-print the latest run with `jq`:
+
+```bash
+jq -c . boitata-audit.log
+```
+
 ### Example: testing with z.ai (GLM models)
 
 [z.ai](https://z.ai) exposes both an OpenAI-compatible and an Anthropic-compatible
