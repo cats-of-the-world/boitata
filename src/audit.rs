@@ -18,9 +18,6 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
 
-/// Maximum length for a single string field before it's truncated in the log.
-const MAX_FIELD_LEN: usize = 4096;
-
 /// A sink that records audit events. Implementors must be cheap to call and must
 /// not panic — audit is best-effort and must never break a run.
 pub trait AuditSink: Send + Sync {
@@ -120,19 +117,6 @@ impl AuditSink for FileAuditLog {
     }
 }
 
-/// Truncate a string to a bounded length for logging, noting how much was cut.
-pub fn truncate_for_log(s: &str) -> String {
-    if s.len() <= MAX_FIELD_LEN {
-        return s.to_string();
-    }
-    // Truncate on a char boundary at or below the limit.
-    let mut end = MAX_FIELD_LEN;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}… ({} more bytes truncated)", &s[..end], s.len() - end)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,19 +136,6 @@ mod tests {
         assert!(json.contains(r#""event":"run_started""#));
         assert!(json.contains(r#""run_id":"run-1""#));
         assert!(json.contains(r#""provider":"openai""#));
-    }
-
-    #[test]
-    fn test_truncate_short_string_unchanged() {
-        assert_eq!(truncate_for_log("hello"), "hello");
-    }
-
-    #[test]
-    fn test_truncate_long_string() {
-        let long = "a".repeat(MAX_FIELD_LEN + 100);
-        let out = truncate_for_log(&long);
-        assert!(out.contains("more bytes truncated"));
-        assert!(out.len() < long.len());
     }
 
     #[test]

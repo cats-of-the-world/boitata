@@ -209,8 +209,8 @@ impl Agent {
                 self.emit(AuditEvent::ToolCall {
                     iteration: iteration + 1,
                     name: tool_call.name.clone(),
-                    arguments: crate::audit::truncate_for_log(&tool_call.arguments.to_string()),
-                    result: crate::audit::truncate_for_log(&content),
+                    arguments: tool_call.arguments.to_string(),
+                    result: content.clone(),
                     is_error,
                 });
 

@@ -118,15 +118,24 @@ async fn run_task(
 
     let provider = build_provider(&config)?;
 
-    // Set up the audit log for this run.
+    // Set up the audit log for this run. A log we can't open must never abort
+    // the run — losing the log is preferable to killing an (often unattended)
+    // task, so we warn and continue without auditing.
     let run_id = uuid::Uuid::new_v4().to_string();
     let audit_path = config
         .audit_log
         .clone()
         .unwrap_or_else(|| DEFAULT_AUDIT_LOG.to_string());
-    let audit = FileAuditLog::open(Path::new(&audit_path), run_id.clone())
-        .with_context(|| format!("failed to open audit log `{audit_path}`"))?;
-    info!("Audit log: {audit_path} (run_id={run_id})");
+    let audit = match FileAuditLog::open(Path::new(&audit_path), run_id.clone()) {
+        Ok(audit) => {
+            info!("Audit log: {audit_path} (run_id={run_id})");
+            Some(Arc::new(audit))
+        }
+        Err(e) => {
+            tracing::warn!("failed to open audit log `{audit_path}`: {e}; continuing without audit");
+            None
+        }
+    };
 
     // Register the deterministic built-in tools the agent can call.
     let mut tools = ToolRegistry::new();
@@ -134,7 +143,10 @@ async fn run_task(
     tools.register(Arc::new(FileWriteTool));
     tools.register(Arc::new(ListDirectoryTool));
 
-    let mut agent = Agent::new(provider, tools).with_audit(Arc::new(audit));
+    let mut agent = Agent::new(provider, tools);
+    if let Some(audit) = audit {
+        agent = agent.with_audit(audit);
+    }
     if let Some(prompt) = config.system_prompt.clone() {
         agent = agent.with_system_prompt(prompt);
     }
