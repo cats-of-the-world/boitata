@@ -119,20 +119,94 @@ cargo build --release
 # The binary will be at ./target/release/boitata
 ```
 
+## Configuration
+
+Boitata reads its settings from a TOML file. Copy the template and fill in your
+credentials:
+
+```bash
+cp boitata.example.toml boitata.toml
+```
+
+`boitata.toml` is git-ignored so your API key never gets committed. The CLI
+looks for it in the current directory by default; override with `--config <path>`
+or the `BOITATA_CONFIG` environment variable.
+
+Minimal config:
+
+```toml
+provider = "openai"   # "anthropic" | "openai" | "ollama"
+model    = "glm-4.6"
+api_key  = "your-key"
+base_url = "https://api.z.ai/api/paas/v4/chat/completions"
+max_tokens = 4096
+```
+
+For real secrets, leave `api_key` blank in the file and export it instead — the
+env var takes precedence:
+
+```bash
+export BOITATA_API_KEY="your-key"
+```
+
 ## Usage
 
 ```bash
-# Run a task
-boitata run "Fix the clippy warnings in src/main.rs"
+# Build
+cargo build --release
 
-# Run with a specific blueprint
-boitata run --blueprint fix_lint_errors "Fix all lint errors"
+# Run a task (uses ./boitata.toml)
+./target/release/boitata run "List the files in the current directory and summarize them"
 
-# Create a workspace
-boitata workspace create /path/to/project
+# Point at a specific config file
+./target/release/boitata run --config prod.toml "Read Cargo.toml and tell me the crate name"
+```
 
-# List tasks
-boitata task list
+The agent loops over LLM calls and tool executions until the task is done, then
+prints the tool calls it made and a final summary.
+
+### Example: testing with z.ai (GLM models)
+
+[z.ai](https://z.ai) exposes both an OpenAI-compatible and an Anthropic-compatible
+API, so either provider works against it.
+
+**OpenAI-compatible** (recommended — matches the `openai` provider exactly):
+
+```toml
+provider = "openai"
+model    = "glm-4.6"
+base_url = "https://api.z.ai/api/paas/v4/chat/completions"
+max_tokens = 4096
+```
+
+**Anthropic-compatible** (exercises the SSE streaming code path):
+
+```toml
+provider = "anthropic"
+model    = "glm-4.6"
+base_url = "https://api.z.ai/api/anthropic/v1/messages"
+max_tokens = 4096
+```
+
+Then:
+
+```bash
+export BOITATA_API_KEY="your-z.ai-key"
+./target/release/boitata run "Say hello and confirm the connection works"
+```
+
+> Note: the `anthropic` provider currently authenticates with the `x-api-key`
+> header. If z.ai's Anthropic endpoint rejects it in favor of `Authorization:
+> Bearer`, prefer the OpenAI-compatible config above.
+
+### Local models with Ollama
+
+No API key required — just point at a running Ollama instance:
+
+```toml
+provider = "ollama"
+model    = "llama3.2"
+base_url = "http://localhost:11434"
 ```
 
 ## Roadmap

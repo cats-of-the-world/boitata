@@ -1,1 +1,4 @@
 /target
+
+# Local config with credentials — never commit
+boitata.toml
