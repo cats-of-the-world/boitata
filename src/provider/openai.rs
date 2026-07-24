@@ -1,4 +1,14 @@
 // OpenAI GPT provider implementation
+//
+// API reference:
+// - Chat Completions:  https://platform.openai.com/docs/api-reference/chat/create
+// - Function calling:  https://platform.openai.com/docs/guides/function-calling
+// - Authentication:    https://platform.openai.com/docs/api-reference/authentication
+// - Errors:            https://platform.openai.com/docs/guides/error-codes
+//
+// NOTE: `complete`/`stream_complete` are not yet implemented (see below). The
+// base URL targets the Chat Completions endpoint; requests must send the
+// `Authorization: Bearer <api_key>` header once the calls are implemented.
 
 use super::{CompletionRequest, CompletionResponse, Provider, ProviderError, ProviderResult};
 use async_trait::async_trait;
@@ -24,6 +34,8 @@ impl OpenAIProvider {
             api_key,
             model,
             max_tokens: 128_000,
+            // Chat Completions endpoint.
+            // See https://platform.openai.com/docs/api-reference/chat/create
             base_url: base_url
                 .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string()),
         }

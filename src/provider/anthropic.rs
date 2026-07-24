@@ -1,4 +1,10 @@
 // Anthropic Claude provider implementation
+//
+// API reference:
+// - Messages API:      https://docs.claude.com/en/api/messages
+// - Versioning header:  https://docs.claude.com/en/api/versioning
+// - Tool use:          https://docs.claude.com/en/docs/agents-and-tools/tool-use/overview
+// - Errors:            https://docs.claude.com/en/api/errors
 
 use super::{
     Chunk, CompletionRequest, CompletionResponse, MessageContent, MessageRole, Provider,
@@ -9,6 +15,9 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 
+/// Value for the required `anthropic-version` request header.
+///
+/// See <https://docs.claude.com/en/api/versioning>.
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
 /// Anthropic Claude provider
@@ -97,6 +106,8 @@ impl Provider for AnthropicProvider {
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let anthropic_request = self.build_request(request);
 
+        // POST /v1/messages with the three required headers.
+        // See https://docs.claude.com/en/api/messages
         let response = self
             .client
             .post(&self.base_url)
