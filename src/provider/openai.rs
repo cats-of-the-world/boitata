@@ -256,7 +256,10 @@ struct OpenAIRequest {
     // OpenAI deprecated `max_tokens`; current models (including the o-series
     // reasoning models, which reject `max_tokens` outright) expect
     // `max_completion_tokens`. Most OpenAI-compatible proxies accept it too.
-    #[serde(rename = "max_completion_tokens", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "max_completion_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
