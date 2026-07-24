@@ -29,6 +29,11 @@ max_tokens = 4096
 # Custom system prompt (optional; a sensible default is used otherwise).
 # system_prompt = "You are a helpful coding agent."
 
+# Path to the JSONL audit log (optional; defaults to boitata-audit.log).
+# Every run appends structured events here: run start, LLM responses, tool
+# calls, token usage, and the final outcome.
+# audit_log = "boitata-audit.log"
+
 # --- Alternatives -----------------------------------------------------------
 #
 # z.ai Anthropic-compatible endpoint (native Anthropic Messages API):

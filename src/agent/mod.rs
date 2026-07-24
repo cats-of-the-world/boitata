@@ -4,6 +4,7 @@ mod context;
 
 pub use context::Context;
 
+use crate::audit::{AuditEvent, AuditSink};
 use crate::provider::{CompletionRequest, Provider, ProviderError, ToolCall};
 use crate::tools::ToolRegistry;
 use std::sync::Arc;
@@ -61,6 +62,7 @@ pub struct Agent {
     tools: ToolRegistry,
     max_iterations: usize,
     system_prompt: String,
+    audit: Option<Arc<dyn AuditSink>>,
 }
 
 impl Agent {
@@ -71,6 +73,7 @@ impl Agent {
             tools,
             max_iterations: 50,
             system_prompt: Self::default_system_prompt(),
+            audit: None,
         }
     }
 
@@ -86,6 +89,20 @@ impl Agent {
         self
     }
 
+    /// Attach an audit sink that records run events (start, LLM responses, tool
+    /// calls, completion).
+    pub fn with_audit(mut self, audit: Arc<dyn AuditSink>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Emit an audit event if a sink is attached. Best-effort — never fails.
+    fn emit(&self, event: AuditEvent) {
+        if let Some(audit) = &self.audit {
+            audit.record(event);
+        }
+    }
+
     /// Run a task
     pub async fn run(&self, task: Task) -> anyhow::Result<TaskResult> {
         info!("Starting task: {}", task.description);
@@ -93,9 +110,17 @@ impl Agent {
         let mut context = Context::new();
         let max_iterations = task.max_iterations.unwrap_or(self.max_iterations);
         let mut tool_calls = Vec::new();
+        let mut total_input_tokens = 0usize;
+        let mut total_output_tokens = 0usize;
 
         // Add the task as the initial user message
         context.add_user_message(&task.description);
+
+        self.emit(AuditEvent::RunStarted {
+            task: task.description.clone(),
+            provider: self.provider.name().to_string(),
+            model: self.provider.model().to_string(),
+        });
 
         for iteration in 0..max_iterations {
             debug!("Iteration {}", iteration + 1);
@@ -103,18 +128,61 @@ impl Agent {
             // Build the completion request
             let request = self.build_request(&context)?;
 
-            // Call the provider
-            let response = self.provider.complete(request).await.map_err(|e| match e {
-                ProviderError::ContextLengthExceeded => {
-                    anyhow::anyhow!("Context length exceeded - task too complex")
+            // Call the provider. On failure, record it before propagating so the
+            // audit log captures why an unattended run died (e.g. auth errors).
+            let response = match self.provider.complete(request).await {
+                Ok(response) => response,
+                Err(e) => {
+                    let message = match e {
+                        ProviderError::ContextLengthExceeded => {
+                            "Context length exceeded - task too complex".to_string()
+                        }
+                        other => format!("Provider error: {}", other),
+                    };
+                    self.emit(AuditEvent::RunCompleted {
+                        success: false,
+                        iterations: iteration + 1,
+                        error: Some(message.clone()),
+                        total_input_tokens,
+                        total_output_tokens,
+                    });
+                    return Err(anyhow::anyhow!(message));
                 }
-                _ => anyhow::anyhow!("Provider error: {}", e),
-            })?;
+            };
+
+            // Track token usage for the audit trail.
+            let (input_tokens, output_tokens) = match &response.usage {
+                Some(usage) => {
+                    total_input_tokens += usage.input_tokens;
+                    total_output_tokens += usage.output_tokens;
+                    (Some(usage.input_tokens), Some(usage.output_tokens))
+                }
+                None => (None, None),
+            };
+
+            self.emit(AuditEvent::LlmResponse {
+                iteration: iteration + 1,
+                has_text: response
+                    .content
+                    .as_ref()
+                    .map(|c| !c.is_empty())
+                    .unwrap_or(false),
+                tool_calls: response.tool_calls.iter().map(|t| t.name.clone()).collect(),
+                input_tokens,
+                output_tokens,
+            });
 
             // Handle the response
             if response.tool_calls.is_empty() {
                 // No tool calls - task is complete
                 info!("Task completed after {} iterations", iteration + 1);
+                self.emit(AuditEvent::RunCompleted {
+                    success: true,
+                    iterations: iteration + 1,
+                    error: None,
+                    total_input_tokens,
+                    total_output_tokens,
+                });
                 return Ok(TaskResult {
                     success: true,
                     final_message: response.content,
@@ -138,6 +206,14 @@ impl Agent {
                     Err(e) => (format!("Error: {}", e), true),
                 };
 
+                self.emit(AuditEvent::ToolCall {
+                    iteration: iteration + 1,
+                    name: tool_call.name.clone(),
+                    arguments: tool_call.arguments.to_string(),
+                    result: content.clone(),
+                    is_error,
+                });
+
                 tool_calls.push(ToolCallSummary {
                     name: tool_call.name.clone(),
                     arguments: tool_call.arguments.to_string(),
@@ -154,6 +230,13 @@ impl Agent {
             "Max iterations ({}) reached without completion",
             max_iterations
         );
+        self.emit(AuditEvent::RunCompleted {
+            success: false,
+            iterations: max_iterations,
+            error: Some("Max iterations reached".to_string()),
+            total_input_tokens,
+            total_output_tokens,
+        });
         Ok(TaskResult {
             success: false,
             final_message: None,
