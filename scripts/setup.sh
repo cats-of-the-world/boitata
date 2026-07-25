@@ -6,7 +6,9 @@
 #   - ripgrep at a pinned version (backs the `search` tool)
 #   - verifies git is present (backs the git_* tools)
 #
-# Crate versions are pinned separately by the committed Cargo.lock.
+# Crate versions for the Boitata build are pinned by the committed Cargo.lock.
+# (ripgrep's own transitive deps are pinned by its published Cargo.lock, used
+# via --locked below.)
 # Safe to re-run — every step is idempotent.
 set -euo pipefail
 
@@ -38,7 +40,9 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 echo "==> Ensuring ripgrep ${RIPGREP_VERSION} (for the search tool)"
-if command -v rg >/dev/null 2>&1 && rg --version | head -1 | grep -q "ripgrep ${RIPGREP_VERSION}"; then
+# Compare just the version token (e.g. "14.1.1") for a robust, distribution-
+# independent check, so we don't needlessly rebuild on a matching install.
+if command -v rg >/dev/null 2>&1 && [ "$(rg --version | head -1 | awk '{print $2}')" = "${RIPGREP_VERSION}" ]; then
     echo "ripgrep ${RIPGREP_VERSION} already installed"
 else
     # Build from source with the toolchain we just pinned — deterministic and

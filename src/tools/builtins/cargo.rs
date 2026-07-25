@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::exec;
-use crate::tools::{Result, Tool};
+use crate::tools::{Result, Tool, ToolError};
 
 /// Optional working-directory property shared by the cargo tools.
 fn cwd_property() -> Value {
@@ -141,6 +141,9 @@ impl Tool for CargoTestTool {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["test".to_string()];
         if let Some(filter) = exec::opt_str_arg(&arguments, "filter") {
+            // `--` ends option parsing so a filter like "--help" is treated as a
+            // test-name filter rather than a flag.
+            args.push("--".to_string());
             args.push(filter);
         }
         exec::run("cargo", args, cwd.as_deref(), exec::BUILD_TIMEOUT).await
@@ -176,6 +179,14 @@ impl Tool for CargoAddTool {
 
     async fn execute(&self, arguments: Value) -> Result<String> {
         let krate = exec::str_arg(&arguments, "crate", self.name())?;
+        // Reject option-like names so a value such as "--config" can't be read
+        // by `cargo add` as a flag instead of a crate spec.
+        if krate.starts_with('-') {
+            return Err(ToolError::InvalidArguments {
+                name: self.name().to_string(),
+                reason: format!("crate `{krate}` must not start with '-'"),
+            });
+        }
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["add".to_string(), krate.to_string()];
         if exec::opt_bool_arg(&arguments, "dev") {

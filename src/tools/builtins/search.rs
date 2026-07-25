@@ -52,8 +52,9 @@ impl Tool for SearchTool {
             args.push("--ignore-case".to_string());
         }
         if let Some(glob) = exec::opt_str_arg(&arguments, "glob") {
-            args.push("--glob".to_string());
-            args.push(glob);
+            // Attached form so a glob starting with `-` (e.g. "-i") can't be read
+            // as a ripgrep flag.
+            args.push(format!("--glob={glob}"));
         }
         // End flag parsing so a pattern/path starting with `-` (e.g. "--json")
         // is treated as a positional argument, not a ripgrep flag.

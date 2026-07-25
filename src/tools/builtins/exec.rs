@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::tools::{Result, ToolError};
@@ -53,7 +54,7 @@ pub(super) async fn run_raw(
     #[cfg(unix)]
     command.process_group(0);
 
-    let child = command.spawn().map_err(|e| {
+    let mut child = command.spawn().map_err(|e| {
         let hint = if e.kind() == std::io::ErrorKind::NotFound {
             format!(" (is `{program}` installed and on PATH?)")
         } else {
@@ -66,13 +67,35 @@ pub(super) async fn run_raw(
     #[cfg(unix)]
     let pgid = child.id().map(|id| id as i32);
 
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(result) => {
-            result.map_err(|e| ToolError::ExecutionFailed(format!("`{program}` failed: {e}")))?
+    // Read the pipes with a byte cap (keeping the tail, where build/test errors
+    // cluster) *while* waiting, rather than buffering unbounded output in memory
+    // via `wait_with_output`. Keeping the child owned here (rather than moving it
+    // into the wait future) lets us kill its group on timeout while it's still
+    // alive — avoiding a PID-recycling race.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+
+    let result = tokio::time::timeout(timeout, async {
+        let stdout = read_capped(&mut stdout_pipe, MAX_STREAM_BYTES);
+        let stderr = read_capped(&mut stderr_pipe, MAX_STREAM_BYTES);
+        let status = child.wait();
+        tokio::join!(stdout, stderr, status)
+    })
+    .await;
+
+    match result {
+        Ok((stdout, stderr, status)) => {
+            let status = status
+                .map_err(|e| ToolError::ExecutionFailed(format!("`{program}` failed: {e}")))?;
+            Ok(Output {
+                code: status.code(),
+                stdout: finalize_stream(stdout),
+                stderr: finalize_stream(stderr),
+            })
         }
         Err(_elapsed) => {
-            // The wait future (owning the child) is dropped, so `kill_on_drop`
-            // signals the leader; also SIGKILL the whole group for any children.
+            // Kill the whole group while the child is still alive (its PID/PGID
+            // is still valid), then reap the child.
             #[cfg(unix)]
             if let Some(pgid) = pgid {
                 // Safety: signalling a process group is always memory-safe; a
@@ -81,18 +104,52 @@ pub(super) async fn run_raw(
                     libc::kill(-pgid, libc::SIGKILL);
                 }
             }
-            return Err(ToolError::ExecutionFailed(format!(
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            Err(ToolError::ExecutionFailed(format!(
                 "`{program}` timed out after {}s",
                 timeout.as_secs()
-            )));
+            )))
         }
-    };
+    }
+}
 
-    Ok(Output {
-        code: output.status.code(),
-        stdout: truncate(&String::from_utf8_lossy(&output.stdout)),
-        stderr: truncate(&String::from_utf8_lossy(&output.stderr)),
-    })
+/// Drain a child pipe, keeping at most `cap` bytes from the *tail* so a chatty
+/// command can't exhaust memory. Continues reading past the cap (discarding) so
+/// the child never blocks on a full pipe. Returns the kept bytes and whether any
+/// were dropped.
+async fn read_capped<R: AsyncRead + Unpin>(pipe: &mut Option<R>, cap: usize) -> (Vec<u8>, bool) {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    let Some(reader) = pipe.as_mut() else {
+        return (buf, truncated);
+    };
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > cap {
+                    let overflow = buf.len() - cap;
+                    buf.drain(..overflow);
+                    truncated = true;
+                }
+            }
+        }
+    }
+    (buf, truncated)
+}
+
+/// Turn captured bytes into a string, noting up front if earlier output was
+/// dropped (we keep the tail).
+fn finalize_stream((bytes, truncated): (Vec<u8>, bool)) -> String {
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        format!("… (earlier output truncated to the last {MAX_STREAM_BYTES} bytes)\n{text}")
+    } else {
+        text
+    }
 }
 
 /// Run a command and format its result as a single string: an exit-status note
@@ -125,18 +182,6 @@ pub(super) async fn run(
         return Ok("(command completed successfully with no output)".to_string());
     }
     Ok(sections.join("\n"))
-}
-
-/// Keep the tail of an oversized stream — build/test errors cluster at the end.
-fn truncate(s: &str) -> String {
-    if s.len() <= MAX_STREAM_BYTES {
-        return s.to_string();
-    }
-    let mut start = s.len() - MAX_STREAM_BYTES;
-    while !s.is_char_boundary(start) {
-        start += 1;
-    }
-    format!("… ({start} earlier bytes truncated)\n{}", &s[start..])
 }
 
 // --- argument helpers -------------------------------------------------------

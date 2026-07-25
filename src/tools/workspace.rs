@@ -6,8 +6,21 @@
 //
 // When a `workspace_root` is configured, path-taking tools (file_read/write,
 // list_directory, search) confine their target to that root: absolute paths
-// outside it, `..` traversal, and symlinks that escape it are rejected. This is
-// applied consistently across all such tools rather than special-casing one.
+// outside it, `..` traversal, and symlinks (in the existing path prefix) that
+// escape it are rejected. This is applied consistently across all such tools
+// rather than special-casing one.
+//
+// Known limitations — this is *lexical + canonicalize* confinement, not a
+// syscall-level jail:
+//   - TOCTOU: a directory component could be swapped for an escaping symlink
+//     between the check here and the tool actually opening the path.
+//   - Symlink tail: a component that doesn't exist yet is appended unchecked, so
+//     a symlink created there afterward could redirect a later write outside the
+//     root.
+// Airtight containment would require opening each component with
+// O_NOFOLLOW/openat2. This layer raises the bar against accidental and simple
+// escapes; the real boundary remains deployment-level isolation (a container or
+// devbox, per the project's Minions model).
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
@@ -25,13 +38,23 @@ pub fn init(root: Option<PathBuf>) {
         // free) paths. If the root doesn't exist yet, fall back to a lexically
         // absolute form — an *absolute* root is what keeps the containment check
         // sound, so never leave it relative.
-        std::fs::canonicalize(&r).unwrap_or_else(|_| {
+        let abs = std::fs::canonicalize(&r).unwrap_or_else(|_| {
             tracing::warn!(
                 "could not canonicalize workspace root `{}`; using its absolute lexical path (symlinks in the root won't be resolved)",
                 r.display()
             );
             std::path::absolute(&r).unwrap_or(r)
-        })
+        });
+        if !abs.is_absolute() {
+            // Should be unreachable (both branches above yield absolute paths);
+            // if it somehow happens, `confine` fails closed rather than trusting
+            // a relative root.
+            tracing::error!(
+                "workspace root `{}` is not absolute; path confinement will reject all paths",
+                abs.display()
+            );
+        }
+        abs
     });
     if ROOT.set(resolved).is_err() {
         tracing::warn!("workspace root already initialized; ignoring repeat init()");
@@ -51,6 +74,13 @@ fn confine_within(root: Option<&Path>, path: &str) -> Result<PathBuf> {
     let Some(root) = root else {
         return Ok(PathBuf::from(path));
     };
+
+    // Fail closed: a non-absolute root can't be reliably contained (see init).
+    if !root.is_absolute() {
+        return Err(ToolError::ExecutionFailed(
+            "workspace root is not absolute; refusing to resolve path".to_string(),
+        ));
+    }
 
     let requested = Path::new(path);
     let joined = if requested.is_absolute() {
