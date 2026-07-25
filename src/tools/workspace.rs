@@ -94,6 +94,11 @@ fn confine_within(root: Option<&Path>, path: &str) -> Result<PathBuf> {
     let normalized = lexical_normalize(&joined);
     let resolved = resolve_existing_prefix(&normalized);
 
+    // NOTE: TOCTOU race — between this check and the caller's open()/read()/write(),
+    // a directory component inside the root could be replaced with a symlink
+    // pointing outside it. This module relies on deployment-level isolation
+    // (container/devbox) as the primary containment; callers should prefer
+    // `O_NOFOLLOW` / `openat2(RESOLVE_BENEATH)` when available.
     if resolved.starts_with(root) {
         Ok(resolved)
     } else {
