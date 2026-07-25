@@ -272,6 +272,12 @@ headers = { X-Workspace = "acme" } # optional extra headers
 On startup you'll see a line like `MCP server \`filesystem\` connected: 12 tool(s)`.
 Credentials (`auth_token`) live in the git-ignored `boitata.toml` and are never logged.
 
+**Resources.** When a server advertises the MCP *resources* capability, Boitata
+also registers two tools per server so the agent can gather context on demand:
+`<server>_list_resources` (returns the available resource URIs, names, and
+descriptions) and `<server>_read_resource` (reads one by URI). These count toward
+the tool total reported at startup and, like tool calls, appear in the audit log.
+
 ## Roadmap
 
 ### Sprint 1: Foundation ✅
@@ -286,11 +292,11 @@ Credentials (`auth_token`) live in the git-ignored `boitata.toml` and are never 
 - [ ] Git operations
 - [ ] Command execution with safety checks
 
-### Sprint 3: MCP Integration
+### Sprint 3: MCP Integration ✅
 - [x] MCP client implementation (via `rmcp`)
 - [x] Tool discovery and registration
 - [x] Remote transport (Streamable HTTP) + stdio
-- [ ] Resource access for context gathering
+- [x] Resource access for context gathering
 
 ### Sprint 4: Blueprint System
 - [ ] Hybrid deterministic/agentic workflows

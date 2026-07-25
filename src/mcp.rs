@@ -17,7 +17,10 @@ use async_trait::async_trait;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
     RoleClient, ServiceExt,
-    model::{CallToolRequestParams, CallToolResult},
+    model::{
+        CallToolRequestParams, CallToolResult, ReadResourceRequestParams, ReadResourceResult,
+        ResourceContents,
+    },
     service::RunningService,
     transport::{
         ConfigureCommandExt, TokioChildProcess,
@@ -134,6 +137,13 @@ impl McpClient {
                 input_schema,
             }));
         }
+
+        // Expose resource access (context gathering) as tools when the server
+        // supports it, so the agent can list and read resources on demand.
+        if self.supports_resources() {
+            out.extend(self.resource_tools(&mut seen));
+        }
+
         Ok(out)
     }
 
@@ -158,6 +168,73 @@ impl McpClient {
             }));
         }
         Ok(text)
+    }
+
+    /// Whether the server advertised the `resources` capability at initialize.
+    fn supports_resources(&self) -> bool {
+        self.service
+            .peer_info()
+            .map(|info| info.capabilities.resources.is_some())
+            .unwrap_or(false)
+    }
+
+    /// List the server's resources as a human-readable summary (one per line).
+    async fn list_resources(&self) -> anyhow::Result<String> {
+        let resources = timeout(DISCOVERY_TIMEOUT, self.service.list_all_resources())
+            .await
+            .map_err(|_| anyhow!("resource listing timed out for `{}`", self.name))?
+            .with_context(|| format!("resource listing failed for `{}`", self.name))?;
+
+        if resources.is_empty() {
+            return Ok("(this server exposes no resources)".to_string());
+        }
+
+        let mut out = String::new();
+        for resource in resources {
+            out.push_str(&format!("- {} ({})", resource.uri, resource.name));
+            if let Some(mime) = &resource.mime_type {
+                out.push_str(&format!(" [{mime}]"));
+            }
+            if let Some(description) = &resource.description {
+                out.push_str(&format!(": {description}"));
+            }
+            out.push('\n');
+        }
+        Ok(out.trim_end().to_string())
+    }
+
+    /// Read a resource by URI and flatten its contents to text.
+    async fn read_resource(&self, uri: &str) -> anyhow::Result<String> {
+        let params = ReadResourceRequestParams::new(uri.to_string());
+        let result = timeout(CALL_TIMEOUT, self.service.read_resource(params))
+            .await
+            .map_err(|_| anyhow!("reading resource `{uri}` timed out"))?
+            .map_err(|e| anyhow!("reading resource `{uri}` failed: {e}"))?;
+        Ok(resource_contents_text(&result))
+    }
+
+    /// Build the `list_resources`/`read_resource` tools for this server, skipping
+    /// any whose name collides with an already-registered tool.
+    fn resource_tools(self: &Arc<Self>, seen: &mut HashSet<String>) -> Vec<Arc<dyn Tool>> {
+        let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+
+        let list_name = sanitize_tool_name(&format!("{}_list_resources", self.name));
+        if seen.insert(list_name.clone()) {
+            tools.push(Arc::new(McpListResourcesTool {
+                client: Arc::clone(self),
+                name: list_name,
+            }));
+        }
+
+        let read_name = sanitize_tool_name(&format!("{}_read_resource", self.name));
+        if seen.insert(read_name.clone()) {
+            tools.push(Arc::new(McpReadResourceTool {
+                client: Arc::clone(self),
+                name: read_name,
+            }));
+        }
+
+        tools
     }
 }
 
@@ -242,6 +319,103 @@ impl Tool for McpTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
     }
+}
+
+/// Lists the resources exposed by one MCP server. Adapts the server's
+/// `resources/list` to a [`Tool`] the agent can call for context gathering.
+struct McpListResourcesTool {
+    client: Arc<McpClient>,
+    name: String,
+}
+
+#[async_trait]
+impl Tool for McpListResourcesTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "List the resources (documents and data) this MCP server exposes, with \
+         their URIs, names, and descriptions. Use a returned URI with the matching \
+         read_resource tool to fetch its contents."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({"type": "object", "properties": {}, "required": []})
+    }
+
+    async fn execute(&self, _arguments: Value) -> crate::tools::Result<String> {
+        self.client
+            .list_resources()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
+    }
+}
+
+/// Reads a single resource from one MCP server by URI. Adapts the server's
+/// `resources/read` to a [`Tool`].
+struct McpReadResourceTool {
+    client: Arc<McpClient>,
+    name: String,
+}
+
+#[async_trait]
+impl Tool for McpReadResourceTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "Read the contents of a resource from this MCP server by its URI. Get \
+         available URIs from the matching list_resources tool."
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "uri": {"type": "string", "description": "The URI of the resource to read"}
+            },
+            "required": ["uri"]
+        })
+    }
+
+    async fn execute(&self, arguments: Value) -> crate::tools::Result<String> {
+        let uri = arguments
+            .get("uri")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments {
+                name: self.name.clone(),
+                reason: "missing 'uri' argument".to_string(),
+            })?;
+        self.client
+            .read_resource(uri)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
+    }
+}
+
+/// Flatten a resource read result to text. Text contents are concatenated; blob
+/// contents are noted (their base64 payload is omitted to keep the context lean).
+fn resource_contents_text(result: &ReadResourceResult) -> String {
+    let mut parts = Vec::new();
+    for content in &result.contents {
+        match content {
+            ResourceContents::TextResourceContents { text, .. } => parts.push(text.clone()),
+            ResourceContents::BlobResourceContents {
+                mime_type, blob, ..
+            } => {
+                let kind = mime_type.as_deref().unwrap_or("binary");
+                parts.push(format!(
+                    "[{kind} resource — {} base64 bytes omitted]",
+                    blob.len()
+                ));
+            }
+            // `ResourceContents` is #[non_exhaustive]; ignore future variants.
+            _ => parts.push("[unsupported resource content omitted]".to_string()),
+        }
+    }
+    parts.join("\n")
 }
 
 /// Flatten an MCP tool result into a single string for the agent. Text blocks
@@ -366,7 +540,7 @@ mod tests {
                     "jsonrpc": "2.0", "id": id,
                     "result": {
                         "protocolVersion": req["params"]["protocolVersion"],
-                        "capabilities": {"tools": {}},
+                        "capabilities": {"tools": {}, "resources": {}},
                         "serverInfo": {"name": "boitata-test", "version": "0.0.1"},
                     }
                 })),
@@ -391,6 +565,26 @@ mod tests {
                             "content": [{"type": "text", "text": format!("echo: {text}")}],
                             "isError": false,
                         }
+                    }))
+                }
+                "resources/list" => Some(serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {"resources": [{
+                        "uri": "mem://note",
+                        "name": "note",
+                        "description": "A test note",
+                        "mimeType": "text/plain",
+                    }]}
+                })),
+                "resources/read" => {
+                    let uri = req["params"]["uri"].as_str().unwrap_or("").to_string();
+                    Some(serde_json::json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {"contents": [{
+                            "uri": uri,
+                            "mimeType": "text/plain",
+                            "text": "resource body",
+                        }]}
                     }))
                 }
                 _ if !id.is_null() => Some(serde_json::json!({
@@ -447,15 +641,41 @@ mod tests {
         let client = McpClient::connect(&config).await.expect("connect");
         let tools = client.discover_tools().await.expect("discover");
 
-        // Tool is discovered and namespaced with the server name.
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name(), "test_echo");
+        // The regular tool plus the two resource tools (server advertised the
+        // resources capability), all namespaced with the server name.
+        let by_name: std::collections::HashMap<&str, &Arc<dyn Tool>> =
+            tools.iter().map(|t| (t.name(), t)).collect();
+        assert!(by_name.contains_key("test_echo"), "{:?}", by_name.keys());
+        assert!(
+            by_name.contains_key("test_list_resources"),
+            "{:?}",
+            by_name.keys()
+        );
+        assert!(
+            by_name.contains_key("test_read_resource"),
+            "{:?}",
+            by_name.keys()
+        );
 
-        // Calling it round-trips through rmcp and returns the server's output.
-        let out = tools[0]
+        // Calling the tool round-trips through rmcp and returns the server output.
+        let echo = by_name["test_echo"]
             .execute(serde_json::json!({"text": "hi"}))
             .await
-            .expect("call");
-        assert_eq!(out, "echo: hi");
+            .expect("call echo");
+        assert_eq!(echo, "echo: hi");
+
+        // Listing resources returns the server's resource summary.
+        let listed = by_name["test_list_resources"]
+            .execute(serde_json::json!({}))
+            .await
+            .expect("list resources");
+        assert!(listed.contains("mem://note"), "{listed}");
+
+        // Reading a resource returns its contents.
+        let body = by_name["test_read_resource"]
+            .execute(serde_json::json!({"uri": "mem://note"}))
+            .await
+            .expect("read resource");
+        assert_eq!(body, "resource body");
     }
 }
