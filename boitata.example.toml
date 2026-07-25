@@ -45,3 +45,33 @@ max_tokens = 4096
 #   provider = "ollama"
 #   model    = "llama3.2"
 #   base_url = "http://localhost:11434"
+
+# --- MCP servers ------------------------------------------------------------
+#
+# Connect to MCP (Model Context Protocol) servers. Each server's tools are
+# discovered and exposed to the agent, namespaced as `<name>_<tool>`. A server
+# that fails to start is logged and skipped — it won't abort the run.
+#
+# The transport is inferred from which field you set:
+#   - `command` → stdio (the server is spawned as a subprocess)
+#   - `url`     → Streamable HTTP (connect to a remote server)
+# Set exactly one of the two per server.
+
+# stdio (subprocess):
+# [[mcp_servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+# [[mcp_servers]]
+# name = "git"
+# command = "uvx"
+# args = ["mcp-server-git"]
+# env = { GIT_AUTHOR_NAME = "boitata" }
+
+# remote (Streamable HTTP):
+# [[mcp_servers]]
+# name = "remote"
+# url = "https://mcp.example.com/mcp"
+# auth_token = "your-token"                 # sent as `Authorization: Bearer <token>`
+# headers = { X-Workspace = "acme" }        # optional extra headers

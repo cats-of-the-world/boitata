@@ -6,6 +6,7 @@
 
 use anyhow::Context;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Environment variable holding an alternate config file path.
@@ -40,6 +41,40 @@ pub struct Config {
     /// Path to the JSONL audit log (optional; defaults to `boitata-audit.log`).
     #[serde(default)]
     pub audit_log: Option<String>,
+    /// MCP servers to connect to. Their tools are exposed to the agent.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+/// A single MCP server. The transport is inferred from which field is set:
+/// `command` → stdio (subprocess), `url` → Streamable HTTP (remote). Exactly one
+/// of the two must be present.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpServerConfig {
+    /// Short identifier used to namespace this server's tools (e.g. `git`).
+    pub name: String,
+
+    // --- stdio transport ---
+    /// Executable to run (e.g. `npx`, `uvx`, an absolute path).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Arguments passed to the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables for the server process.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+
+    // --- Streamable HTTP transport ---
+    /// URL of a remote MCP server (Streamable HTTP endpoint).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Bearer token sent as `Authorization: Bearer <token>` (no prefix here).
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    /// Extra HTTP headers to send with every request.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 impl Config {
