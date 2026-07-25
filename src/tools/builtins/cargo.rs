@@ -143,7 +143,6 @@ impl Tool for CargoTestTool {
         if let Some(filter) = exec::opt_str_arg(&arguments, "filter") {
             // `--` ends option parsing so a filter like "--help" is treated as a
             // test-name filter rather than a flag.
-        if let Some(filter) = exec::opt_str_arg(&arguments, "filter") {
             args.push("--".to_string());
             args.push(filter);
         }
@@ -189,8 +188,7 @@ impl Tool for CargoAddTool {
             });
         }
         let cwd = exec::opt_str_arg(&arguments, "cwd");
-        let mut args = vec!["add".to_string(), "--".to_string(), krate.to_string()];
-        // Note: '--' must come after all named flags like --dev, --features
+        let mut args = vec!["add".to_string()];
         if exec::opt_bool_arg(&arguments, "dev") {
             args.push("--dev".to_string());
         }
@@ -201,6 +199,10 @@ impl Tool for CargoAddTool {
                 args.push(features.join(","));
             }
         }
+        // `--` must come after the named flags (--dev/--features); it ends option
+        // parsing so the crate spec that follows is never read as a flag.
+        args.push("--".to_string());
+        args.push(krate.to_string());
         exec::run("cargo", args, cwd.as_deref(), exec::BUILD_TIMEOUT).await
     }
 }

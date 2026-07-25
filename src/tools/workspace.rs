@@ -123,6 +123,10 @@ fn lexical_normalize(path: &Path) -> PathBuf {
                 Some(Component::Normal(_)) => {
                     out.pop();
                 }
+                // Unix-only assumption: at a filesystem root, `..` has nowhere to
+                // go, so drop it. On Windows a bare drive `Prefix` (e.g. `C:`
+                // without a following `RootDir`) is drive-*relative*, so dropping
+                // a trailing `..` there would be wrong, but Windows isn't a target.
                 Some(Component::RootDir | Component::Prefix(_)) => { /* at fs root; drop */ }
                 // Empty buffer or a trailing `..` — keep the `..` so it's visible
                 // to the containment check.
@@ -141,10 +145,14 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 fn resolve_existing_prefix(path: &Path) -> PathBuf {
     for ancestor in path.ancestors() {
         if let Ok(canonical) = std::fs::canonicalize(ancestor) {
-            return match path.strip_prefix(ancestor) {
-                Ok(tail) => canonical.join(tail),
-                Err(_) => canonical,
-            };
+            // `ancestor` comes from `path.ancestors()`, so `strip_prefix` always
+            // succeeds. Re-appending the (possibly non-existent) tail onto the
+            // canonicalized prefix keeps a symlinked prefix resolved (e.g. macOS
+            // `/tmp` -> `/private/tmp`) while still allowing not-yet-created files.
+            let tail = path
+                .strip_prefix(ancestor)
+                .expect("ancestor is a prefix of path");
+            return canonical.join(tail);
         }
     }
     path.to_path_buf()

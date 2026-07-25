@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::exec;
+use crate::tools::workspace;
 use crate::tools::{Result, Tool, ToolError};
 
 /// Shows the working-tree status.
@@ -79,8 +80,11 @@ impl Tool for GitDiffTool {
             args.push("--staged".to_string());
         }
         if let Some(path) = exec::opt_str_arg(&arguments, "path") {
+            // Confine the path to the workspace root (no-op unless one is set),
+            // consistent with the fs and search tools.
+            let confined = workspace::confine(&path)?;
             args.push("--".to_string());
-            args.push(path);
+            args.push(confined.to_string_lossy().into_owned());
         }
         exec::run("git", args, cwd.as_deref(), exec::DEFAULT_TIMEOUT).await
     }
@@ -173,24 +177,12 @@ impl Tool for GitBranchTool {
         let args = match action.as_str() {
             "list" => vec!["branch".to_string(), "--list".to_string()],
             "create" => {
-                let name = exec::str_arg(&arguments, "name", self.name())?;
-                if name.starts_with('-') {
-                    return Err(ToolError::InvalidArguments {
-                        name: self.name().to_string(),
-                        reason: "branch name must not start with '-'".to_string(),
-                    });
-                }
-                vec!["checkout".to_string(), "-b".to_string(), name.to_string()]
+                let name = self.branch_name(&arguments)?;
+                vec!["checkout".to_string(), "-b".to_string(), name]
             }
             "switch" => {
-                let name = exec::str_arg(&arguments, "name", self.name())?;
-                if name.starts_with('-') {
-                    return Err(ToolError::InvalidArguments {
-                        name: self.name().to_string(),
-                        reason: "branch name must not start with '-'".to_string(),
-                    });
-                }
-                vec!["checkout".to_string(), "--".to_string(), name.to_string()]
+                let name = self.branch_name(&arguments)?;
+                vec!["checkout".to_string(), "--".to_string(), name]
             }
             other => {
                 return Err(ToolError::InvalidArguments {

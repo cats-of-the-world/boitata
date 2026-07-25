@@ -126,20 +126,25 @@ async fn read_capped<R: AsyncRead + Unpin>(pipe: &mut Option<R>, cap: usize) -> 
     };
     let mut chunk = [0u8; 8192];
     loop {
+        // A read error on a child pipe is treated as end-of-stream: the capture
+        // is best-effort and the child's exit status is the source of truth for
+        // success/failure, so we keep whatever we have rather than fail the tool.
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
-// After first truncation, switch to "keep last chunk only" mode:
-if buf.len() + n > cap {
-    // Keep only what fits from the new chunk
-    buf.clear();
-    let start = n.saturating_sub(cap);
-    buf.extend_from_slice(&chunk[start..n]);
-    truncated = true;
-} else {
-    buf.extend_from_slice(&chunk[..n]);
-}
+                if buf.len() > cap {
+                    // Keep only the last `cap` bytes (the tail, where build/test
+                    // errors cluster). Advance the cut to the next UTF-8 char
+                    // boundary so we never split a multi-byte sequence; otherwise
+                    // `from_utf8_lossy` would corrupt the kept output's first char.
+                    let mut cut = buf.len() - cap;
+                    while cut < buf.len() && (buf[cut] & 0xC0) == 0x80 {
+                        cut += 1;
+                    }
+                    buf.drain(..cut);
+                    truncated = true;
+                }
             }
         }
     }
@@ -258,6 +263,42 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err}").contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_read_capped_no_truncation_no_duplication() {
+        // Under the cap: bytes are kept verbatim, exactly once (regression for a
+        // bug that appended each chunk twice).
+        let data: Vec<u8> = (0..50u8).collect();
+        let mut pipe = Some(&data[..]);
+        let (kept, truncated) = read_capped(&mut pipe, 1000).await;
+        assert!(!truncated);
+        assert_eq!(kept, data);
+    }
+
+    #[tokio::test]
+    async fn test_read_capped_keeps_tail() {
+        // Over the cap: only the last `cap` bytes (the tail) survive. ASCII data
+        // so the UTF-8 boundary walk doesn't shift the cut.
+        let data: Vec<u8> = (0..200).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut pipe = Some(&data[..]);
+        let (kept, truncated) = read_capped(&mut pipe, 40).await;
+        assert!(truncated);
+        assert_eq!(kept, data[160..]);
+    }
+
+    #[tokio::test]
+    async fn test_read_capped_keeps_utf8_boundary() {
+        // The kept tail must start on a char boundary so `from_utf8_lossy` doesn't
+        // corrupt the first char. The accented letter below is two bytes
+        // (0xC3 0xA9); cutting between them would split it.
+        let data = "a\u{e9}".repeat(50).into_bytes(); // 150 bytes, accent = 2 bytes each
+        let mut pipe = Some(&data[..]);
+        let (kept, _truncated) = read_capped(&mut pipe, 40).await;
+        assert!(
+            std::str::from_utf8(&kept).is_ok(),
+            "tail split a multi-byte char"
+        );
     }
 
     #[test]

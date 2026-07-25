@@ -36,6 +36,14 @@ impl Tool for SearchTool {
 
     async fn execute(&self, arguments: Value) -> Result<String> {
         let pattern = exec::str_arg(&arguments, "pattern", self.name())?;
+        if pattern.trim().is_empty() {
+            // An empty/whitespace pattern is an empty regex that matches every
+            // line of every file; scan the whole tree for nothing useful.
+            return Err(ToolError::InvalidArguments {
+                name: self.name().to_string(),
+                reason: "`pattern` must not be empty".to_string(),
+            });
+        }
         // Confine the search root to the workspace (no-op unless one is set).
         let raw_path = exec::opt_str_arg(&arguments, "path").unwrap_or_else(|| ".".to_string());
         let path = workspace::confine(&raw_path)?
