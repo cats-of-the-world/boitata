@@ -22,7 +22,11 @@ use audit::FileAuditLog;
 use config::{Config, McpServerConfig};
 use mcp::McpClient;
 use provider::{AnthropicProvider, OllamaProvider, OpenAIProvider, Provider};
-use tools::{FileReadTool, FileWriteTool, ListDirectoryTool, ToolRegistry};
+use tools::{
+    CargoAddTool, CargoCheckTool, CargoClippyTool, CargoFmtTool, CargoTestTool, ExecuteCommandTool,
+    FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool, GitStatusTool,
+    ListDirectoryTool, SearchTool, ToolRegistry,
+};
 
 /// Fallback output-token budget when the config doesn't set `max_tokens`.
 const DEFAULT_MAX_TOKENS: usize = 4096;
@@ -143,9 +147,29 @@ async fn run_task(
 
     // Register the deterministic built-in tools the agent can call.
     let mut tools = ToolRegistry::new();
+    // File system
     tools.register(Arc::new(FileReadTool));
     tools.register(Arc::new(FileWriteTool));
     tools.register(Arc::new(ListDirectoryTool));
+    // Search
+    tools.register(Arc::new(SearchTool));
+    // Git
+    tools.register(Arc::new(GitStatusTool));
+    tools.register(Arc::new(GitDiffTool));
+    tools.register(Arc::new(GitCommitTool));
+    tools.register(Arc::new(GitBranchTool));
+    // Cargo
+    tools.register(Arc::new(CargoCheckTool));
+    tools.register(Arc::new(CargoClippyTool));
+    tools.register(Arc::new(CargoFmtTool));
+    tools.register(Arc::new(CargoTestTool));
+    tools.register(Arc::new(CargoAddTool));
+    // Arbitrary command execution — opt-out via config for restricted deployments.
+    if config.allow_execute_command.unwrap_or(true) {
+        tools.register(Arc::new(ExecuteCommandTool));
+    } else {
+        info!("execute_command tool disabled by config");
+    }
 
     // Connect any configured MCP servers and register their tools. A server we
     // can't reach is logged and skipped so one broken server can't abort the

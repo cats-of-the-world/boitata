@@ -34,6 +34,11 @@ max_tokens = 4096
 # calls, token usage, and the final outcome.
 # audit_log = "boitata-audit.log"
 
+# Whether to register the arbitrary `execute_command` tool (default true). Set
+# to false to restrict the agent to the structured tools (file, search, git_*,
+# cargo_*) — it can then no longer run arbitrary shell commands.
+# allow_execute_command = true
+
 # --- Alternatives -----------------------------------------------------------
 #
 # z.ai Anthropic-compatible endpoint (native Anthropic Messages API):

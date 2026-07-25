@@ -84,24 +84,29 @@ Built-in tools organized by category:
 - `file_write` - Write to files
 - `list_directory` - List directory contents
 
-**Code Operations (Deterministic - Planned)**
+**Code Operations (Deterministic)**
 - `cargo_check` - Run `cargo check`
-- `cargo_clippy` - Run `cargo clippy` with auto-fix
-- `cargo_fmt` - Format code with `cargo fmt`
-- `cargo_test` - Run tests
-- `cargo_add` - Add dependencies
+- `cargo_clippy` - Run `cargo clippy` (optional `fix`)
+- `cargo_fmt` - Format code with `cargo fmt` (optional `check`)
+- `cargo_test` - Run tests (optional `filter`)
+- `cargo_add` - Add dependencies (optional `features`, `dev`)
 
 **Search (Deterministic)**
 - `search` - Code search via ripgrep
 
 **Git (Deterministic)**
 - `git_status` - Check git status
-- `git_diff` - Show changes
-- `git_commit` - Commit changes
-- `git_branch` - Manage branches
+- `git_diff` - Show changes (unstaged or `staged`)
+- `git_commit` - Commit changes (optional `all`; never pushes)
+- `git_branch` - List / create / switch branches
 
 **Command Execution (Semi-Deterministic)**
-- `execute_command` - Run shell commands (deterministic if command is)
+- `execute_command` - Run shell commands; runs with the agent's privileges, so
+  it can be disabled via `allow_execute_command = false` in config
+
+Every command-based tool runs with a timeout, captured output (truncated to keep
+the context lean), and no interactive stdin. Non-zero exits (compiler/linter/test
+failures) come back as output — not errors — so the agent can read them and iterate.
 
 ### MCP Integration
 Planned support for the Model Context Protocol to connect to external tools and data sources.
@@ -286,11 +291,11 @@ the tool total reported at startup and, like tool calls, appear in the audit log
 - [x] Tool registry and first built-in tools
 - [x] File system tools (read, write, list)
 
-### Sprint 2: Tools (In Progress)
-- [ ] Code operations (cargo check, clippy, fmt, test)
-- [ ] Search tools (ripgrep integration)
-- [ ] Git operations
-- [ ] Command execution with safety checks
+### Sprint 2: Tools ✅
+- [x] Code operations (cargo check, clippy, fmt, test, add)
+- [x] Search tools (ripgrep integration)
+- [x] Git operations (status, diff, commit, branch)
+- [x] Command execution with safety checks (timeout, output cap, opt-out)
 
 ### Sprint 3: MCP Integration ✅
 - [x] MCP client implementation (via `rmcp`)

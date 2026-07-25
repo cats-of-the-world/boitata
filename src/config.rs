@@ -47,6 +47,10 @@ pub struct Config {
     /// MCP servers to connect to. Their tools are exposed to the agent.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Whether to register the arbitrary `execute_command` tool. Defaults to
+    /// enabled; set to `false` to restrict the agent to the structured tools.
+    #[serde(default)]
+    pub allow_execute_command: Option<bool>,
 }
 
 /// A single MCP server. The transport is inferred from which field is set:
@@ -141,6 +145,7 @@ impl std::fmt::Debug for Config {
             .field("system_prompt", &self.system_prompt)
             .field("audit_log", &self.audit_log)
             .field("mcp_servers", &self.mcp_servers)
+            .field("allow_execute_command", &self.allow_execute_command)
             .finish()
     }
 }
@@ -293,6 +298,7 @@ mod tests {
                 headers: HashMap::from([("X-Api-Key".to_string(), "hdr-secret".to_string())]),
                 ..Default::default()
             }],
+            allow_execute_command: None,
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("super-secret-key"), "{rendered}");
