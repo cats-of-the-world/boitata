@@ -48,6 +48,9 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # Unix process-group signalling (kill a timed-out command's whole tree)
 libc = "0.2.189"
 
+# Command denylist patterns for the tool permission policy
+regex = "1.13.1"
+
 # MCP (Model Context Protocol) client
 rmcp = { version = "2.2.0", default-features = false, features = [
     "client",
@@ -79,6 +82,7 @@ toml = { workspace = true }
 chrono = { workspace = true }
 rmcp = { workspace = true }
 tokio-util = { workspace = true }
+regex = { workspace = true }
 
 # Unix-only: process-group kill for timed-out commands.
 [target.'cfg(unix)'.dependencies]

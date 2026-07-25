@@ -26,7 +26,7 @@ use tools::workspace;
 use tools::{
     CargoAddTool, CargoCheckTool, CargoClippyTool, CargoFmtTool, CargoTestTool, ExecuteCommandTool,
     FileEditTool, FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool,
-    GitStatusTool, ListDirectoryTool, SearchTool, ToolRegistry,
+    GitStatusTool, ListDirectoryTool, SearchTool, ToolPolicy, ToolRegistry,
 };
 
 /// Fallback output-token budget when the config doesn't set `max_tokens`.
@@ -213,6 +213,15 @@ async fn run_task(
     if let Some(max_iterations) = config.max_iterations {
         agent = agent.with_max_iterations(max_iterations);
     }
+
+    // Build the tool permission policy from config. A bad denylist regex is a
+    // config error we fail on rather than silently dropping a security control.
+    let policy = ToolPolicy::new(
+        config.tool_policy.unwrap_or_default(),
+        &config.denied_commands,
+    )
+    .context("invalid `denied_commands` regex in config")?;
+    agent = agent.with_policy(policy);
 
     info!("Running task: {}", task);
     let result = agent.run(Task::new(task)).await?;

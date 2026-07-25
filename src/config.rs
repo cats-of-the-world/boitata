@@ -59,6 +59,14 @@ pub struct Config {
     /// default (`true`); set to `false` to let them access any path.
     #[serde(default)]
     pub confine_tools: Option<bool>,
+    /// Tool permission policy: `allow_all` (default) or `read_only` (deny any
+    /// tool that may modify state).
+    #[serde(default)]
+    pub tool_policy: Option<crate::tools::PolicyMode>,
+    /// Regex patterns; an `execute_command` whose command matches any of these
+    /// is denied by the policy.
+    #[serde(default)]
+    pub denied_commands: Vec<String>,
 }
 
 /// A single MCP server. The transport is inferred from which field is set:
@@ -156,6 +164,8 @@ impl std::fmt::Debug for Config {
             .field("allow_execute_command", &self.allow_execute_command)
             .field("workspace_root", &self.workspace_root)
             .field("confine_tools", &self.confine_tools)
+            .field("tool_policy", &self.tool_policy)
+            .field("denied_commands", &self.denied_commands)
             .finish()
     }
 }
@@ -311,6 +321,8 @@ mod tests {
             allow_execute_command: None,
             workspace_root: None,
             confine_tools: None,
+            tool_policy: None,
+            denied_commands: Vec::new(),
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("super-secret-key"), "{rendered}");
