@@ -173,12 +173,24 @@ impl Tool for GitBranchTool {
         let args = match action.as_str() {
             "list" => vec!["branch".to_string(), "--list".to_string()],
             "create" => {
-                let name = self.branch_name(&arguments)?;
-                vec!["checkout".to_string(), "-b".to_string(), name]
+                let name = exec::str_arg(&arguments, "name", self.name())?;
+                if name.starts_with('-') {
+                    return Err(ToolError::InvalidArguments {
+                        name: self.name().to_string(),
+                        reason: "branch name must not start with '-'".to_string(),
+                    });
+                }
+                vec!["checkout".to_string(), "-b".to_string(), name.to_string()]
             }
             "switch" => {
-                let name = self.branch_name(&arguments)?;
-                vec!["checkout".to_string(), name]
+                let name = exec::str_arg(&arguments, "name", self.name())?;
+                if name.starts_with('-') {
+                    return Err(ToolError::InvalidArguments {
+                        name: self.name().to_string(),
+                        reason: "branch name must not start with '-'".to_string(),
+                    });
+                }
+                vec!["checkout".to_string(), "--".to_string(), name.to_string()]
             }
             other => {
                 return Err(ToolError::InvalidArguments {
