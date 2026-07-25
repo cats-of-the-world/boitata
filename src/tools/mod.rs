@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 // Re-export built-in tools
 pub use builtins::{
     CargoAddTool, CargoCheckTool, CargoClippyTool, CargoFmtTool, CargoTestTool, ExecuteCommandTool,
-    FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool, GitStatusTool,
-    ListDirectoryTool, SearchTool,
+    FileEditTool, FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool,
+    GitStatusTool, ListDirectoryTool, SearchTool,
 };
 
 /// Result type for tool operations
