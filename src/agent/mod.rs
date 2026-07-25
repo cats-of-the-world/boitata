@@ -6,7 +6,7 @@ pub use context::Context;
 
 use crate::audit::{AuditEvent, AuditSink};
 use crate::provider::{CompletionRequest, Provider, ProviderError, ToolCall};
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolOutput, ToolRegistry};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -201,27 +201,36 @@ impl Agent {
                 debug!("Executing tool: {}", tool_call.name);
 
                 let result = self.execute_tool_call(tool_call.clone()).await;
-                let (content, is_error) = match result {
-                    Ok(r) => (r, false),
-                    Err(e) => (format!("Error: {}", e), true),
+                let (output, is_error) = match result {
+                    Ok(output) => (output, false),
+                    Err(e) => (ToolOutput::text(format!("Error: {e}")), true),
                 };
+                // Flatten to text for the text-only sinks (audit log + CLI
+                // summary); the structured content is carried into the context.
+                let text = output.to_text();
+                let read_only = self
+                    .tools
+                    .annotations(&tool_call.name)
+                    .map(|a| a.read_only)
+                    .unwrap_or(false);
 
                 self.emit(AuditEvent::ToolCall {
                     iteration: iteration + 1,
                     name: tool_call.name.clone(),
                     arguments: tool_call.arguments.to_string(),
-                    result: content.clone(),
+                    result: text.clone(),
                     is_error,
+                    read_only,
                 });
 
                 tool_calls.push(ToolCallSummary {
                     name: tool_call.name.clone(),
                     arguments: tool_call.arguments.to_string(),
-                    result: content.clone(),
+                    result: text,
                     is_error,
                 });
 
-                context.add_tool_result(&tool_call.id, &content, is_error);
+                context.add_tool_result(&tool_call.id, output.content, is_error);
             }
         }
 
@@ -265,7 +274,7 @@ impl Agent {
         })
     }
 
-    async fn execute_tool_call(&self, tool_call: ToolCall) -> anyhow::Result<String> {
+    async fn execute_tool_call(&self, tool_call: ToolCall) -> anyhow::Result<ToolOutput> {
         self.tools
             .execute(&tool_call.name, &tool_call.arguments)
             .await

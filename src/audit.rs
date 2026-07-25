@@ -61,6 +61,9 @@ pub enum AuditEvent {
         arguments: String,
         result: String,
         is_error: bool,
+        /// Whether the tool declared itself read-only (see `ToolAnnotations`),
+        /// so a reader can distinguish observing from mutating calls.
+        read_only: bool,
     },
     /// The run finished (successfully or not).
     RunCompleted {

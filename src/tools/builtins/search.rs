@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::exec;
 use crate::tools::workspace;
-use crate::tools::{Result, Tool, ToolError};
+use crate::tools::{Result, Tool, ToolAnnotations, ToolError, ToolOutput};
 
 /// Searches file contents with ripgrep (`rg`).
 pub struct SearchTool;
@@ -21,6 +21,10 @@ impl Tool for SearchTool {
          their file paths and line numbers."
     }
 
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations::read_only()
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -34,7 +38,7 @@ impl Tool for SearchTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String> {
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
         let pattern = exec::str_arg(&arguments, "pattern", self.name())?;
         if pattern.trim().is_empty() {
             // An empty/whitespace pattern is an empty regex that matches every
@@ -79,12 +83,12 @@ impl Tool for SearchTool {
                 // output so the agent never gets a bare "" with no explanation.
                 let trimmed = output.stdout.trim_end();
                 if trimmed.is_empty() {
-                    Ok("(no matches found)".to_string())
+                    Ok(ToolOutput::text("(no matches found)"))
                 } else {
-                    Ok(trimmed.to_string())
+                    Ok(ToolOutput::text(trimmed))
                 }
             }
-            Some(1) => Ok("(no matches found)".to_string()),
+            Some(1) => Ok(ToolOutput::text("(no matches found)")),
             _ => {
                 let detail = if output.stderr.trim().is_empty() {
                     "unknown error".to_string()
@@ -122,13 +126,15 @@ mod tests {
         let hit = SearchTool
             .execute(serde_json::json!({"pattern": "needle", "path": path.clone()}))
             .await
-            .unwrap();
+            .unwrap()
+            .to_text();
         assert!(hit.contains("needle"), "{hit}");
 
         let miss = SearchTool
             .execute(serde_json::json!({"pattern": "zzz_absent", "path": path}))
             .await
-            .unwrap();
+            .unwrap()
+            .to_text();
         assert_eq!(miss, "(no matches found)");
     }
 }

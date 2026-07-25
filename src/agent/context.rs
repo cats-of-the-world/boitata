@@ -1,6 +1,6 @@
 // Context management for agent conversations
 
-use crate::provider::{Message, MessageContent, MessageRole, ToolCall, ToolResult};
+use crate::provider::{Message, MessageContent, MessageRole, ToolCall, ToolContent, ToolResult};
 
 /// Conversation context
 #[derive(Debug, Clone)]
@@ -66,8 +66,15 @@ impl Context {
         });
     }
 
-    /// Add a tool result
-    pub fn add_tool_result(&mut self, tool_call_id: &str, content: &str, is_error: bool) {
+    /// Add a tool result. `content` is the tool's structured output (text and/or
+    /// images), carried through so providers that support image tool results can
+    /// pass them to the model.
+    pub fn add_tool_result(
+        &mut self,
+        tool_call_id: &str,
+        content: Vec<ToolContent>,
+        is_error: bool,
+    ) {
         // Find or create a tool results message
         let last_is_tool_results = self
             .messages
@@ -84,7 +91,7 @@ impl Context {
             {
                 results.push(ToolResult {
                     tool_call_id: tool_call_id.to_string(),
-                    content: content.to_string(),
+                    content,
                     is_error: Some(is_error),
                 });
             }
@@ -94,7 +101,7 @@ impl Context {
                 role: MessageRole::Tool,
                 content: ContextContent::ToolResults(vec![ToolResult {
                     tool_call_id: tool_call_id.to_string(),
-                    content: content.to_string(),
+                    content,
                     is_error: Some(is_error),
                 }]),
             });
@@ -164,11 +171,11 @@ mod tests {
     #[test]
     fn test_add_tool_result() {
         let mut ctx = Context::new();
-        ctx.add_tool_result("tool-1", "result", false);
+        ctx.add_tool_result("tool-1", vec![ToolContent::text("result")], false);
         assert_eq!(ctx.len(), 1);
 
         // Add another tool result - should be grouped
-        ctx.add_tool_result("tool-2", "result2", false);
+        ctx.add_tool_result("tool-2", vec![ToolContent::text("result2")], false);
         assert_eq!(ctx.len(), 1); // Still 1 message with 2 results
     }
 

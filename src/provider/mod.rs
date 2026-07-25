@@ -73,11 +73,48 @@ impl From<&str> for MessageContent {
     }
 }
 
-/// Result from a tool execution
+/// A single piece of content produced by a tool. Mirrors the subset of MCP
+/// content types Boitata carries end-to-end (goose returns the same shape).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolContent {
+    /// Plain UTF-8 text.
+    Text { text: String },
+    /// A base64-encoded image plus its MIME type (e.g. `image/png`).
+    Image { mime_type: String, data: String },
+}
+
+impl ToolContent {
+    /// Convenience constructor for a text block.
+    pub fn text(text: impl Into<String>) -> Self {
+        ToolContent::Text { text: text.into() }
+    }
+}
+
+/// Flatten tool content to plain text. Providers whose tool-result role accepts
+/// only text (OpenAI, Ollama), the audit log, and the CLI summary all use this;
+/// images collapse to a short placeholder noting their type and size.
+pub fn tool_content_text(content: &[ToolContent]) -> String {
+    let mut parts = Vec::with_capacity(content.len());
+    for item in content {
+        match item {
+            ToolContent::Text { text } => parts.push(text.clone()),
+            ToolContent::Image { mime_type, data } => parts.push(format!(
+                "[{mime_type} image, {} base64 chars omitted]",
+                data.len()
+            )),
+        }
+    }
+    parts.join("\n")
+}
+
+/// Result from a tool execution. `content` is an ordered list of parts so a tool
+/// (or an MCP server) can return text and/or images; text-only sinks flatten it
+/// with [`tool_content_text`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool_call_id: String,
-    pub content: String,
+    pub content: Vec<ToolContent>,
     pub is_error: Option<bool>,
 }
 

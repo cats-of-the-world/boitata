@@ -8,7 +8,7 @@
 
 use super::{
     Chunk, CompletionRequest, CompletionResponse, Message, MessageContent, MessageRole, Provider,
-    ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage,
+    ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage, tool_content_text,
 };
 use async_trait::async_trait;
 use reqwest::Client;
@@ -170,8 +170,10 @@ fn to_openai_messages(system: Option<String>, messages: Vec<Message>) -> Vec<Ope
             MessageContent::ToolResults(results) => {
                 for result in results {
                     out.push(OpenAIMessage {
+                        // OpenAI tool messages accept only text, so image content
+                        // collapses to a short placeholder (see tool_content_text).
                         role: "tool".to_string(),
-                        content: Some(result.content),
+                        content: Some(tool_content_text(&result.content)),
                         tool_calls: None,
                         tool_call_id: Some(result.tool_call_id),
                     });
@@ -360,20 +362,21 @@ mod tests {
 
     #[test]
     fn test_tool_results_expand_to_tool_messages() {
-        use super::super::ToolResult;
+        use super::super::{ToolContent, ToolResult};
         let messages = to_openai_messages(
             None,
             vec![Message {
                 role: MessageRole::Tool,
                 content: MessageContent::ToolResults(vec![ToolResult {
                     tool_call_id: "call-1".to_string(),
-                    content: "result".to_string(),
+                    content: vec![ToolContent::text("result")],
                     is_error: Some(false),
                 }]),
             }],
         );
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "tool");
+        assert_eq!(messages[0].content.as_deref(), Some("result"));
         assert_eq!(messages[0].tool_call_id.as_deref(), Some("call-1"));
     }
 }

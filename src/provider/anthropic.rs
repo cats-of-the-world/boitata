@@ -8,7 +8,7 @@
 
 use super::{
     Chunk, CompletionRequest, CompletionResponse, MessageContent, MessageRole, Provider,
-    ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage,
+    ProviderError, ProviderResult, ToolCall, ToolContent, ToolDefinition, Usage,
 };
 use async_trait::async_trait;
 use reqwest::Client;
@@ -334,10 +334,48 @@ enum AnthropicContent {
         #[serde(rename = "type")]
         content_type: String,
         tool_use_id: String,
-        content: String,
+        // Anthropic accepts an array of text/image blocks as tool_result content,
+        // so tool output (which may include images) is preserved rather than
+        // flattened to a string.
+        content: Vec<AnthropicToolResultBlock>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+}
+
+/// A block inside a `tool_result`: either text or a base64 image. See
+/// <https://docs.claude.com/en/docs/build-with-claude/vision>.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicToolResultBlock {
+    Text { text: String },
+    Image { source: AnthropicImageSource },
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    media_type: String,
+    data: String,
+}
+
+/// Map Boitata tool content into Anthropic `tool_result` blocks, preserving
+/// images as base64 sources.
+fn tool_result_blocks(content: Vec<ToolContent>) -> Vec<AnthropicToolResultBlock> {
+    content
+        .into_iter()
+        .map(|item| match item {
+            ToolContent::Text { text } => AnthropicToolResultBlock::Text { text },
+            ToolContent::Image { mime_type, data } => AnthropicToolResultBlock::Image {
+                source: AnthropicImageSource {
+                    source_type: "base64".to_string(),
+                    media_type: mime_type,
+                    data,
+                },
+            },
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -359,7 +397,7 @@ impl From<MessageContent> for Vec<AnthropicContent> {
                 .map(|r| AnthropicContent::ToolResult {
                     content_type: "tool_result".to_string(),
                     tool_use_id: r.tool_call_id,
-                    content: r.content,
+                    content: tool_result_blocks(r.content),
                     is_error: r.is_error,
                 })
                 .collect(),

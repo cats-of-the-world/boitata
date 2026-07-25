@@ -34,7 +34,8 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::config::{McpServerConfig, McpTransport};
-use crate::tools::{Tool, ToolError};
+use crate::provider::{ToolContent, tool_content_text};
+use crate::tools::{Tool, ToolAnnotations, ToolError, ToolOutput};
 
 /// Maximum length of a tool name exposed to the model (provider schemas cap
 /// names at 64 chars and restrict the character set).
@@ -128,6 +129,18 @@ impl McpClient {
 
             let description = tool.description.map(|d| d.to_string()).unwrap_or_default();
             let input_schema = Value::Object((*tool.input_schema).clone());
+            // Project the server's MCP annotations onto ours, applying the MCP
+            // spec defaults for any hint the server omitted.
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .map(|a| ToolAnnotations {
+                    read_only: a.read_only_hint.unwrap_or(false),
+                    destructive: a.destructive_hint.unwrap_or(true),
+                    idempotent: a.idempotent_hint.unwrap_or(false),
+                    open_world: a.open_world_hint.unwrap_or(true),
+                })
+                .unwrap_or_default();
 
             out.push(Arc::new(McpTool {
                 client: Arc::clone(self),
@@ -135,6 +148,7 @@ impl McpClient {
                 exposed_name,
                 description,
                 input_schema,
+                annotations,
             }));
         }
 
@@ -147,8 +161,9 @@ impl McpClient {
         Ok(out)
     }
 
-    /// Invoke a tool by its server-side name and return the text result.
-    async fn call(&self, remote_name: &str, arguments: Value) -> anyhow::Result<String> {
+    /// Invoke a tool by its server-side name and return its content (text and/or
+    /// images).
+    async fn call(&self, remote_name: &str, arguments: Value) -> anyhow::Result<Vec<ToolContent>> {
         let mut params = CallToolRequestParams::new(remote_name.to_string());
         if let Some(object) = arguments.as_object() {
             params = params.with_arguments(object.clone());
@@ -159,15 +174,17 @@ impl McpClient {
             .map_err(|_| anyhow!("MCP tool `{remote_name}` timed out"))?
             .map_err(|e| anyhow!("MCP tool `{remote_name}` call failed: {e}"))?;
 
-        let text = result_text(&result);
+        let content = result_content(&result);
         if result.is_error.unwrap_or(false) {
+            // Flatten to text for the error message.
+            let text = tool_content_text(&content);
             return Err(anyhow!(if text.is_empty() {
                 format!("MCP tool `{remote_name}` reported an error")
             } else {
                 text
             }));
         }
-        Ok(text)
+        Ok(content)
     }
 
     /// Whether the server advertised the `resources` capability at initialize.
@@ -309,6 +326,8 @@ struct McpTool {
     exposed_name: String,
     description: String,
     input_schema: Value,
+    /// Side-effect hints projected from the server's MCP `ToolAnnotations`.
+    annotations: ToolAnnotations,
 }
 
 #[async_trait]
@@ -325,10 +344,15 @@ impl Tool for McpTool {
         self.input_schema.clone()
     }
 
-    async fn execute(&self, arguments: Value) -> crate::tools::Result<String> {
+    fn annotations(&self) -> ToolAnnotations {
+        self.annotations
+    }
+
+    async fn execute(&self, arguments: Value) -> crate::tools::Result<ToolOutput> {
         self.client
             .call(&self.remote_name, arguments)
             .await
+            .map(|content| ToolOutput { content })
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
     }
 }
@@ -352,14 +376,19 @@ impl Tool for McpListResourcesTool {
          read_resource tool to fetch its contents."
     }
 
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations::read_only()
+    }
+
     fn input_schema(&self) -> Value {
         serde_json::json!({"type": "object", "properties": {}, "required": []})
     }
 
-    async fn execute(&self, _arguments: Value) -> crate::tools::Result<String> {
+    async fn execute(&self, _arguments: Value) -> crate::tools::Result<ToolOutput> {
         self.client
             .list_resources()
             .await
+            .map(ToolOutput::from)
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
     }
 }
@@ -382,6 +411,10 @@ impl Tool for McpReadResourceTool {
          available URIs from the matching list_resources tool."
     }
 
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations::read_only()
+    }
+
     fn input_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -392,7 +425,7 @@ impl Tool for McpReadResourceTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> crate::tools::Result<String> {
+    async fn execute(&self, arguments: Value) -> crate::tools::Result<ToolOutput> {
         let uri = arguments
             .get("uri")
             .and_then(|v| v.as_str())
@@ -403,6 +436,7 @@ impl Tool for McpReadResourceTool {
         self.client
             .read_resource(uri)
             .await
+            .map(ToolOutput::from)
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
     }
 }
@@ -432,24 +466,29 @@ fn resource_contents_text(result: &ReadResourceResult) -> String {
     parts.join("\n")
 }
 
-/// Flatten an MCP tool result into a single string for the agent. Text blocks
-/// are concatenated; non-text blocks are noted; empty results fall back to any
-/// structured content.
-fn result_text(result: &CallToolResult) -> String {
+/// Convert an MCP tool result into Boitata tool content. Text and image blocks
+/// are preserved; other block types are noted; an empty result falls back to any
+/// structured content (as text).
+fn result_content(result: &CallToolResult) -> Vec<ToolContent> {
     let mut parts = Vec::new();
     for block in &result.content {
-        match block.as_text() {
-            Some(text) => parts.push(text.text.clone()),
-            None => parts.push("[non-text content omitted]".to_string()),
+        if let Some(text) = block.as_text() {
+            parts.push(ToolContent::text(text.text.clone()));
+        } else if let Some(image) = block.as_image() {
+            parts.push(ToolContent::Image {
+                mime_type: image.mime_type.clone(),
+                data: image.data.clone(),
+            });
+        } else {
+            parts.push(ToolContent::text("[non-text content omitted]"));
         }
     }
-    let text = parts.join("\n");
-    if text.is_empty() {
+    if parts.is_empty() {
         if let Some(structured) = &result.structured_content {
-            return structured.to_string();
+            return vec![ToolContent::text(structured.to_string())];
         }
     }
-    text
+    parts
 }
 
 /// Restrict a tool name to `[A-Za-z0-9_-]` and cap its length so it satisfies
@@ -486,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn test_result_text_joins_text_blocks() {
+    fn test_result_content_joins_text_blocks() {
         let result: CallToolResult = serde_json::from_value(serde_json::json!({
             "content": [
                 {"type": "text", "text": "hello"},
@@ -494,17 +533,38 @@ mod tests {
             ]
         }))
         .unwrap();
-        assert_eq!(result_text(&result), "hello\nworld");
+        assert_eq!(tool_content_text(&result_content(&result)), "hello\nworld");
     }
 
     #[test]
-    fn test_result_text_falls_back_to_structured() {
+    fn test_result_content_preserves_images() {
+        let result: CallToolResult = serde_json::from_value(serde_json::json!({
+            "content": [
+                {"type": "text", "text": "see"},
+                {"type": "image", "data": "AAAA", "mimeType": "image/png"}
+            ]
+        }))
+        .unwrap();
+        let content = result_content(&result);
+        assert_eq!(content.len(), 2);
+        assert!(matches!(&content[0], ToolContent::Text { text } if text == "see"));
+        assert!(matches!(
+            &content[1],
+            ToolContent::Image { mime_type, data } if mime_type == "image/png" && data == "AAAA"
+        ));
+    }
+
+    #[test]
+    fn test_result_content_falls_back_to_structured() {
         let result: CallToolResult = serde_json::from_value(serde_json::json!({
             "content": [],
             "structuredContent": {"ok": true}
         }))
         .unwrap();
-        assert_eq!(result_text(&result), r#"{"ok":true}"#);
+        assert_eq!(
+            tool_content_text(&result_content(&result)),
+            r#"{"ok":true}"#
+        );
     }
 
     // Transport inference/validation is tested in `config` (McpServerConfig::transport).
@@ -675,21 +735,24 @@ mod tests {
         let echo = by_name["test_echo"]
             .execute(serde_json::json!({"text": "hi"}))
             .await
-            .expect("call echo");
+            .expect("call echo")
+            .to_text();
         assert_eq!(echo, "echo: hi");
 
         // Listing resources returns the server's resource summary.
         let listed = by_name["test_list_resources"]
             .execute(serde_json::json!({}))
             .await
-            .expect("list resources");
+            .expect("list resources")
+            .to_text();
         assert!(listed.contains("mem://note"), "{listed}");
 
         // Reading a resource returns its contents.
         let body = by_name["test_read_resource"]
             .execute(serde_json::json!({"uri": "mem://note"}))
             .await
-            .expect("read resource");
+            .expect("read resource")
+            .to_text();
         assert_eq!(body, "resource body");
     }
 }
