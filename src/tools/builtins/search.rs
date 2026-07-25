@@ -79,6 +79,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_hit_and_miss() {
+        // The search tool shells out to ripgrep; skip if it isn't installed.
+        if std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping test_search_hit_and_miss: ripgrep (rg) not installed");
+            return;
+        }
+
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "alpha needle beta\n").unwrap();
         let path = dir.path().to_string_lossy().into_owned();
