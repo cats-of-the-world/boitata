@@ -243,9 +243,14 @@ async fn run_task(
 async fn connect_mcp(server: &McpServerConfig, tools: &mut ToolRegistry) -> anyhow::Result<usize> {
     let client = McpClient::connect(server).await?;
     let mcp_tools = client.discover_tools().await?;
-    let count = mcp_tools.len();
+    // Count only tools that actually registered: a namespaced name can collide
+    // with a built-in or another server's tool, in which case `register` keeps
+    // the existing one and skips the duplicate (see `ToolRegistry::register`).
+    let mut count = 0;
     for tool in mcp_tools {
-        tools.register(tool);
+        if tools.register(tool) {
+            count += 1;
+        }
     }
     Ok(count)
 }
