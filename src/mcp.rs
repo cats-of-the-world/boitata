@@ -8,10 +8,11 @@
 // Two transports are supported, inferred from the server config: `command` for
 // stdio (spawned subprocess) and `url` for Streamable HTTP (remote server).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
@@ -27,13 +28,22 @@ use rmcp::{
 };
 use serde_json::Value;
 use tokio::process::Command;
+use tokio::time::timeout;
 
-use crate::config::McpServerConfig;
+use crate::config::{McpServerConfig, McpTransport};
 use crate::tools::{Tool, ToolError};
 
 /// Maximum length of a tool name exposed to the model (provider schemas cap
 /// names at 64 chars and restrict the character set).
 const MAX_TOOL_NAME_LEN: usize = 64;
+
+/// Deadline for the initialize handshake — a server that accepts the connection
+/// but then hangs must not stall the whole run.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Deadline for listing a server's tools.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Deadline for a single tool call.
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A live connection to a single MCP server.
 ///
@@ -55,30 +65,30 @@ impl McpClient {
     /// transports yield the same `RunningService`, so the caller is transport-
     /// agnostic afterward.
     pub async fn connect(config: &McpServerConfig) -> anyhow::Result<Arc<Self>> {
-        let service = match (&config.url, &config.command) {
-            (Some(_), Some(_)) => bail!(
-                "MCP server `{}` sets both `url` and `command`; use exactly one",
-                config.name
-            ),
-            (Some(url), None) => {
+        let name = &config.name;
+        let service = match config.transport()? {
+            McpTransport::Http {
+                url,
+                auth_token,
+                headers,
+            } => {
                 // Build via `from_config` without naming the concrete HTTP client
                 // type: rmcp bundles its own reqwest version, distinct from ours.
-                let transport =
-                    StreamableHttpClientTransport::from_config(build_http_config(url, config)?);
-                ().serve(transport).await.with_context(|| {
-                    format!("MCP handshake failed for `{}` ({url})", config.name)
-                })?
-            }
-            (None, Some(command)) => {
-                let transport = build_stdio_transport(command, config)?;
-                ().serve(transport)
+                let transport = StreamableHttpClientTransport::from_config(build_http_config(
+                    url, auth_token, headers,
+                )?);
+                timeout(HANDSHAKE_TIMEOUT, ().serve(transport))
                     .await
-                    .with_context(|| format!("MCP handshake failed for `{}`", config.name))?
+                    .map_err(|_| anyhow!("MCP handshake timed out for `{name}` ({url})"))?
+                    .with_context(|| format!("MCP handshake failed for `{name}` ({url})"))?
             }
-            (None, None) => bail!(
-                "MCP server `{}` must set either `command` (stdio) or `url` (http)",
-                config.name
-            ),
+            McpTransport::Stdio { command, args, env } => {
+                let transport = build_stdio_transport(name, command, args, env)?;
+                timeout(HANDSHAKE_TIMEOUT, ().serve(transport))
+                    .await
+                    .map_err(|_| anyhow!("MCP handshake timed out for `{name}`"))?
+                    .with_context(|| format!("MCP handshake failed for `{name}`"))?
+            }
         };
 
         Ok(Arc::new(Self {
@@ -89,18 +99,30 @@ impl McpClient {
 
     /// Discover the server's tools and wrap each as a registrable [`Tool`].
     pub async fn discover_tools(self: &Arc<Self>) -> anyhow::Result<Vec<Arc<dyn Tool>>> {
-        let tools = self
-            .service
-            .list_all_tools()
+        let tools = timeout(DISCOVERY_TIMEOUT, self.service.list_all_tools())
             .await
+            .map_err(|_| anyhow!("tool discovery timed out for `{}`", self.name))?
             .with_context(|| format!("tool discovery failed for `{}`", self.name))?;
 
         let mut out: Vec<Arc<dyn Tool>> = Vec::with_capacity(tools.len());
+        // Names are namespaced with the server name and sanitized/truncated, so
+        // two distinct remote tools can collide. Detect that instead of letting
+        // `ToolRegistry::register` silently overwrite one of them.
+        let mut seen = HashSet::with_capacity(tools.len());
         for tool in tools {
             let remote_name = tool.name.to_string();
-            // Namespace with the server name to avoid collisions across servers
-            // and with built-in tools.
             let exposed_name = sanitize_tool_name(&format!("{}_{}", self.name, remote_name));
+
+            if !seen.insert(exposed_name.clone()) {
+                tracing::warn!(
+                    "MCP server `{}`: tool `{}` maps to duplicate name `{}` after sanitization; skipping",
+                    self.name,
+                    remote_name,
+                    exposed_name
+                );
+                continue;
+            }
+
             let description = tool.description.map(|d| d.to_string()).unwrap_or_default();
             let input_schema = Value::Object((*tool.input_schema).clone());
 
@@ -122,10 +144,9 @@ impl McpClient {
             params = params.with_arguments(object.clone());
         }
 
-        let result = self
-            .service
-            .call_tool(params)
+        let result = timeout(CALL_TIMEOUT, self.service.call_tool(params))
             .await
+            .map_err(|_| anyhow!("MCP tool `{remote_name}` timed out"))?
             .map_err(|e| anyhow!("MCP tool `{remote_name}` call failed: {e}"))?;
 
         let text = result_text(&result);
@@ -141,21 +162,22 @@ impl McpClient {
 }
 
 /// Build a stdio transport that spawns the server as a subprocess.
+///
+/// `kill_on_drop` ensures the OS reaps the child when the handle is dropped,
+/// even if the graceful MCP shutdown is ignored or the process is wedged.
 fn build_stdio_transport(
+    name: &str,
     command: &str,
-    config: &McpServerConfig,
+    args: &[String],
+    env: &HashMap<String, String>,
 ) -> anyhow::Result<TokioChildProcess> {
-    let command = Command::new(command).configure(|cmd| {
-        cmd.args(&config.args);
-        cmd.envs(&config.env);
+    let child = Command::new(command).configure(|cmd| {
+        cmd.args(args);
+        cmd.envs(env);
+        cmd.kill_on_drop(true);
     });
-    TokioChildProcess::new(command).with_context(|| {
-        format!(
-            "failed to spawn MCP server `{}` (command: {})",
-            config.name,
-            config.command.as_deref().unwrap_or_default()
-        )
-    })
+    TokioChildProcess::new(child)
+        .with_context(|| format!("failed to spawn MCP server `{name}` (command: {command})"))
 }
 
 /// Build the Streamable HTTP transport config for a remote server, applying the
@@ -164,25 +186,26 @@ fn build_stdio_transport(
 /// `from_config`, never named — rmcp bundles a different reqwest version.
 fn build_http_config(
     url: &str,
-    config: &McpServerConfig,
+    auth_token: Option<&str>,
+    headers: &HashMap<String, String>,
 ) -> anyhow::Result<StreamableHttpClientTransportConfig> {
     let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
 
-    if let Some(token) = &config.auth_token {
+    if let Some(token) = auth_token {
         // rmcp adds the `Bearer ` prefix itself.
-        transport_config = transport_config.auth_header(token.clone());
+        transport_config = transport_config.auth_header(token.to_string());
     }
 
-    if !config.headers.is_empty() {
-        let mut headers = HashMap::with_capacity(config.headers.len());
-        for (key, value) in &config.headers {
+    if !headers.is_empty() {
+        let mut header_map = HashMap::with_capacity(headers.len());
+        for (key, value) in headers {
             let name = HeaderName::from_bytes(key.as_bytes())
                 .with_context(|| format!("invalid HTTP header name `{key}`"))?;
             let value = HeaderValue::from_str(value)
                 .with_context(|| format!("invalid HTTP header value for `{key}`"))?;
-            headers.insert(name, value);
+            header_map.insert(name, value);
         }
-        transport_config = transport_config.custom_headers(headers);
+        transport_config = transport_config.custom_headers(header_map);
     }
 
     Ok(transport_config)
@@ -296,57 +319,20 @@ mod tests {
         assert_eq!(result_text(&result), r#"{"ok":true}"#);
     }
 
-    #[tokio::test]
-    async fn test_connect_requires_a_transport() {
-        let config = McpServerConfig {
-            name: "x".to_string(),
-            ..Default::default()
-        };
-        let err = McpClient::connect(&config)
-            .await
-            .err()
-            .expect("expected an error")
-            .to_string();
-        assert!(err.contains("command") && err.contains("url"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn test_connect_rejects_both_transports() {
-        let config = McpServerConfig {
-            name: "x".to_string(),
-            command: Some("true".to_string()),
-            url: Some("http://localhost/mcp".to_string()),
-            ..Default::default()
-        };
-        let err = McpClient::connect(&config)
-            .await
-            .err()
-            .expect("expected an error")
-            .to_string();
-        assert!(err.contains("both"), "{err}");
-    }
+    // Transport inference/validation is tested in `config` (McpServerConfig::transport).
 
     #[test]
     fn test_http_config_applies_auth_token() {
-        let config = McpServerConfig {
-            name: "x".to_string(),
-            auth_token: Some("secret".to_string()),
-            ..Default::default()
-        };
-        let cfg = build_http_config("http://localhost/mcp", &config).unwrap();
+        // `auth_header` is a documented public field of rmcp's transport config.
+        let cfg =
+            build_http_config("http://localhost/mcp", Some("secret"), &HashMap::new()).unwrap();
         assert_eq!(cfg.auth_header.as_deref(), Some("secret"));
     }
 
     #[test]
     fn test_http_config_rejects_invalid_header() {
-        let mut headers = HashMap::new();
-        headers.insert("bad header".to_string(), "v".to_string());
-        let config = McpServerConfig {
-            name: "x".to_string(),
-            headers,
-            ..Default::default()
-        };
-        assert!(build_http_config("http://localhost/mcp", &config).is_err());
+        let headers = HashMap::from([("bad header".to_string(), "v".to_string())]);
+        assert!(build_http_config("http://localhost/mcp", None, &headers).is_err());
     }
 
     /// A minimal MCP stdio server (newline-delimited JSON-RPC) implemented in
