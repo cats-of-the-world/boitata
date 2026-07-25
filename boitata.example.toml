@@ -34,6 +34,20 @@ max_tokens = 4096
 # calls, token usage, and the final outcome.
 # audit_log = "boitata-audit.log"
 
+# Whether to register the arbitrary `execute_command` tool (default true). Set
+# to false to restrict the agent to the structured tools (file, search, git_*,
+# cargo_*) — it can then no longer run arbitrary shell commands.
+# allow_execute_command = true
+
+# Path-taking tools (file_read/write, list_directory, search) are confined to a
+# workspace root by default (secure by default). The root defaults to the
+# directory Boitata runs in; override it here to point elsewhere.
+# workspace_root = "/path/to/project"
+
+# Set to false to disable confinement entirely and let the path tools access
+# any path the process can. Leave unset/true unless you have a reason.
+# confine_tools = true
+
 # --- Alternatives -----------------------------------------------------------
 #
 # z.ai Anthropic-compatible endpoint (native Anthropic Messages API):

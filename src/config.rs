@@ -47,6 +47,18 @@ pub struct Config {
     /// MCP servers to connect to. Their tools are exposed to the agent.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Whether to register the arbitrary `execute_command` tool. Defaults to
+    /// enabled; set to `false` to restrict the agent to the structured tools.
+    #[serde(default)]
+    pub allow_execute_command: Option<bool>,
+    /// Directory that path-taking tools (file_read/write, list_directory,
+    /// search) are confined to. Defaults to the current working directory.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    /// Whether to confine path-taking tools to `workspace_root`. Secure by
+    /// default (`true`); set to `false` to let them access any path.
+    #[serde(default)]
+    pub confine_tools: Option<bool>,
 }
 
 /// A single MCP server. The transport is inferred from which field is set:
@@ -141,6 +153,9 @@ impl std::fmt::Debug for Config {
             .field("system_prompt", &self.system_prompt)
             .field("audit_log", &self.audit_log)
             .field("mcp_servers", &self.mcp_servers)
+            .field("allow_execute_command", &self.allow_execute_command)
+            .field("workspace_root", &self.workspace_root)
+            .field("confine_tools", &self.confine_tools)
             .finish()
     }
 }
@@ -293,6 +308,9 @@ mod tests {
                 headers: HashMap::from([("X-Api-Key".to_string(), "hdr-secret".to_string())]),
                 ..Default::default()
             }],
+            allow_execute_command: None,
+            workspace_root: None,
+            confine_tools: None,
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("super-secret-key"), "{rendered}");

@@ -84,24 +84,40 @@ Built-in tools organized by category:
 - `file_write` - Write to files
 - `list_directory` - List directory contents
 
-**Code Operations (Deterministic - Planned)**
+**Code Operations (Deterministic)**
 - `cargo_check` - Run `cargo check`
-- `cargo_clippy` - Run `cargo clippy` with auto-fix
-- `cargo_fmt` - Format code with `cargo fmt`
-- `cargo_test` - Run tests
-- `cargo_add` - Add dependencies
+- `cargo_clippy` - Run `cargo clippy` (optional `fix`)
+- `cargo_fmt` - Format code with `cargo fmt` (optional `check`)
+- `cargo_test` - Run tests (optional `filter`)
+- `cargo_add` - Add dependencies (optional `features`, `dev`)
 
 **Search (Deterministic)**
 - `search` - Code search via ripgrep
 
 **Git (Deterministic)**
 - `git_status` - Check git status
-- `git_diff` - Show changes
-- `git_commit` - Commit changes
-- `git_branch` - Manage branches
+- `git_diff` - Show changes (unstaged or `staged`)
+- `git_commit` - Commit changes (optional `all`; never pushes)
+- `git_branch` - List / create / switch branches
 
 **Command Execution (Semi-Deterministic)**
-- `execute_command` - Run shell commands (deterministic if command is)
+- `execute_command` - Run shell commands; runs with the agent's privileges.
+  Enabled by default — disable with `allow_execute_command = false`
+
+Every command-based tool runs with a timeout, captured output (truncated to keep
+the context lean), and no interactive stdin. On Unix, a timed-out command's whole
+process group is killed so nothing is orphaned. Non-zero exits (compiler/linter/
+test failures) come back as output — not errors — so the agent can read them and
+iterate.
+
+**Path confinement (secure by default).** The path-taking tools (`file_read`,
+`file_write`, `list_directory`, `search`) are confined to a workspace root —
+by default the directory Boitata runs in. Absolute paths, `..` traversal, and
+symlinks that escape the root are rejected. Point it elsewhere with
+`workspace_root`, or disable confinement entirely with `confine_tools = false`.
+Note that `execute_command` runs real shell commands and is **not** bound by this
+confinement. It's enabled by default for full capability; for a locked-down
+deployment, combine the confinement with `allow_execute_command = false`.
 
 ### MCP Integration
 Planned support for the Model Context Protocol to connect to external tools and data sources.
@@ -118,6 +134,21 @@ cargo build --release
 
 # The binary will be at ./target/release/boitata
 ```
+
+## Development setup
+
+Boitata needs a Rust toolchain plus a couple of external tools: `ripgrep` (for
+the `search` tool) and `git` (for the `git_*` tools). To set up a new machine
+deterministically:
+
+```bash
+./scripts/setup.sh
+```
+
+This installs the exact Rust toolchain pinned in `rust-toolchain.toml`, installs
+the pinned `ripgrep` version, and checks for `git`. Crate versions are pinned by
+the committed `Cargo.lock`, and CI builds with the same pinned toolchain (rustup
+reads `rust-toolchain.toml` automatically).
 
 ## Configuration
 
@@ -286,11 +317,11 @@ the tool total reported at startup and, like tool calls, appear in the audit log
 - [x] Tool registry and first built-in tools
 - [x] File system tools (read, write, list)
 
-### Sprint 2: Tools (In Progress)
-- [ ] Code operations (cargo check, clippy, fmt, test)
-- [ ] Search tools (ripgrep integration)
-- [ ] Git operations
-- [ ] Command execution with safety checks
+### Sprint 2: Tools ✅
+- [x] Code operations (cargo check, clippy, fmt, test, add)
+- [x] Search tools (ripgrep integration)
+- [x] Git operations (status, diff, commit, branch)
+- [x] Command execution with safety checks (timeout, output cap, opt-out)
 
 ### Sprint 3: MCP Integration ✅
 - [x] MCP client implementation (via `rmcp`)

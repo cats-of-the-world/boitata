@@ -1,0 +1,6 @@
+# Pins the Rust toolchain so every machine — and CI — builds with the exact same
+# compiler. rustup reads this automatically in the repo directory, taking
+# precedence over the default/override toolchain.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

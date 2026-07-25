@@ -1,6 +1,7 @@
 // Tools module: Tool registry and built-in tool implementations
 
 pub mod builtins;
+pub mod workspace;
 
 use crate::provider::ToolDefinition;
 use async_trait::async_trait;
@@ -9,7 +10,11 @@ use std::sync::Arc;
 use thiserror::Error;
 
 // Re-export built-in tools
-pub use builtins::fs::{FileReadTool, FileWriteTool, ListDirectoryTool};
+pub use builtins::{
+    CargoAddTool, CargoCheckTool, CargoClippyTool, CargoFmtTool, CargoTestTool, ExecuteCommandTool,
+    FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool, GitStatusTool,
+    ListDirectoryTool, SearchTool,
+};
 
 /// Result type for tool operations
 pub type Result<T> = std::result::Result<T, ToolError>;

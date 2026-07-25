@@ -1,8 +1,20 @@
 // File system tools
 
+use crate::tools::workspace;
 use crate::tools::{Result, Tool, ToolError};
 use async_trait::async_trait;
 use std::fs;
+
+/// Run a blocking filesystem closure on the runtime's blocking pool so it
+/// doesn't stall the async executor. Maps a task panic to a tool error.
+async fn blocking<F>(f: F) -> Result<String>
+where
+    F: FnOnce() -> Result<String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("filesystem task failed: {e}")))?
+}
 
 /// Tool for reading file contents
 pub struct FileReadTool;
@@ -37,12 +49,17 @@ impl Tool for FileReadTool {
             .ok_or_else(|| ToolError::InvalidArguments {
                 name: self.name().to_string(),
                 reason: "missing 'path' argument".to_string(),
-            })?;
+            })?
+            .to_string();
 
-        let content = fs::read_to_string(path)
-            .map_err(|e| ToolError::ExecutionFailed(format!("failed to read file: {}", e)))?;
-
-        Ok(content)
+        // `confine` (canonicalize) and the read are blocking; run them off the
+        // async executor.
+        blocking(move || {
+            let path = workspace::confine(&path)?;
+            fs::read_to_string(&path)
+                .map_err(|e| ToolError::ExecutionFailed(format!("failed to read file: {e}")))
+        })
+        .await
     }
 }
 
@@ -83,24 +100,28 @@ impl Tool for FileWriteTool {
             .ok_or_else(|| ToolError::InvalidArguments {
                 name: self.name().to_string(),
                 reason: "missing 'path' argument".to_string(),
-            })?;
-
+            })?
+            .to_string();
         let content = arguments
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArguments {
                 name: self.name().to_string(),
                 reason: "missing 'content' argument".to_string(),
-            })?;
+            })?
+            .to_string();
 
-        fs::write(path, content)
-            .map_err(|e| ToolError::ExecutionFailed(format!("failed to write file: {}", e)))?;
-
-        Ok(format!(
-            "Successfully wrote {} bytes to {}",
-            content.len(),
-            path
-        ))
+        blocking(move || {
+            let confined = workspace::confine(&path)?;
+            fs::write(&confined, &content)
+                .map_err(|e| ToolError::ExecutionFailed(format!("failed to write file: {e}")))?;
+            Ok(format!(
+                "Successfully wrote {} bytes to {}",
+                content.len(),
+                path
+            ))
+        })
+        .await
     }
 }
 
@@ -137,34 +158,40 @@ impl Tool for ListDirectoryTool {
             .ok_or_else(|| ToolError::InvalidArguments {
                 name: self.name().to_string(),
                 reason: "missing 'path' argument".to_string(),
+            })?
+            .to_string();
+
+        blocking(move || {
+            let path = workspace::confine(&path)?;
+            let entries = fs::read_dir(&path).map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to read directory: {e}"))
             })?;
 
-        let entries = fs::read_dir(path)
-            .map_err(|e| ToolError::ExecutionFailed(format!("failed to read directory: {}", e)))?;
+            let mut result = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to read directory entry: {e}"))
+                })?;
 
-        let mut result = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                ToolError::ExecutionFailed(format!("failed to read directory entry: {}", e))
-            })?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                let metadata = entry.metadata().map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to read metadata: {e}"))
+                })?;
 
-            let name = entry.file_name().to_string_lossy().to_string();
-            let metadata = entry.metadata().map_err(|e| {
-                ToolError::ExecutionFailed(format!("failed to read metadata: {}", e))
-            })?;
+                let file_type = if metadata.is_dir() {
+                    "DIR"
+                } else if metadata.is_file() {
+                    "FILE"
+                } else {
+                    "OTHER"
+                };
 
-            let file_type = if metadata.is_dir() {
-                "DIR"
-            } else if metadata.is_file() {
-                "FILE"
-            } else {
-                "OTHER"
-            };
+                result.push(format!("{file_type} {name}"));
+            }
 
-            result.push(format!("{} {}", file_type, name));
-        }
-
-        Ok(result.join("\n"))
+            Ok(result.join("\n"))
+        })
+        .await
     }
 }
 

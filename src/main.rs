@@ -22,7 +22,12 @@ use audit::FileAuditLog;
 use config::{Config, McpServerConfig};
 use mcp::McpClient;
 use provider::{AnthropicProvider, OllamaProvider, OpenAIProvider, Provider};
-use tools::{FileReadTool, FileWriteTool, ListDirectoryTool, ToolRegistry};
+use tools::workspace;
+use tools::{
+    CargoAddTool, CargoCheckTool, CargoClippyTool, CargoFmtTool, CargoTestTool, ExecuteCommandTool,
+    FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool, GitStatusTool,
+    ListDirectoryTool, SearchTool, ToolRegistry,
+};
 
 /// Fallback output-token budget when the config doesn't set `max_tokens`.
 const DEFAULT_MAX_TOKENS: usize = 4096;
@@ -141,11 +146,51 @@ async fn run_task(
         }
     };
 
+    // Confine the path-taking tools to a workspace root. Secure by default:
+    // confinement is on unless `confine_tools = false`, and the root defaults to
+    // the current working directory when `workspace_root` is unset.
+    let workspace_root = if config.confine_tools.unwrap_or(true) {
+        let root = config
+            .workspace_root
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            });
+        info!("Confining path tools to workspace root: {}", root.display());
+        Some(root)
+    } else {
+        info!("Tool path confinement disabled (confine_tools = false)");
+        None
+    };
+    workspace::init(workspace_root);
+
     // Register the deterministic built-in tools the agent can call.
     let mut tools = ToolRegistry::new();
+    // File system
     tools.register(Arc::new(FileReadTool));
     tools.register(Arc::new(FileWriteTool));
     tools.register(Arc::new(ListDirectoryTool));
+    // Search
+    tools.register(Arc::new(SearchTool));
+    // Git
+    tools.register(Arc::new(GitStatusTool));
+    tools.register(Arc::new(GitDiffTool));
+    tools.register(Arc::new(GitCommitTool));
+    tools.register(Arc::new(GitBranchTool));
+    // Cargo
+    tools.register(Arc::new(CargoCheckTool));
+    tools.register(Arc::new(CargoClippyTool));
+    tools.register(Arc::new(CargoFmtTool));
+    tools.register(Arc::new(CargoTestTool));
+    tools.register(Arc::new(CargoAddTool));
+    // Arbitrary shell execution is enabled by default so the agent is fully
+    // capable out of the box; disable it for restricted deployments with
+    // `allow_execute_command = false`.
+    if config.allow_execute_command.unwrap_or(true) {
+        tools.register(Arc::new(ExecuteCommandTool));
+    } else {
+        info!("execute_command tool disabled by config");
+    }
 
     // Connect any configured MCP servers and register their tools. A server we
     // can't reach is logged and skipped so one broken server can't abort the

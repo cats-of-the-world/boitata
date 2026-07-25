@@ -8,33 +8,51 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# These jobs only read the repo, so grant the GITHUB_TOKEN least privilege
+# (overrides a repo default that might otherwise be write-all).
+permissions:
+  contents: read
+
+# The Rust toolchain is pinned by rust-toolchain.toml; each job runs
+# `rustup show` (the runner ships rustup) to install exactly that channel plus
+# the rustfmt/clippy components, so CI matches local builds. Third-party actions
+# are pinned to a commit SHA to avoid mutable-tag supply-chain risk.
 jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - run: rustup show
       - run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - run: rustup show
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - run: cargo clippy --all-targets --all-features
 
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - run: rustup show
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      # ripgrep backs the `search` tool. Install a pinned, checksum-verified
+      # release so its test runs deterministically.
+      - name: Install ripgrep (pinned, checksum-verified)
+        run: |
+          RG_VERSION=14.1.1
+          RG_SHA256=2f0c732ef166b4f7be7190d4012d60b3f8467bdd6f795c0598817bd2ac1706ae
+          curl -fsSLO "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep_${RG_VERSION}-1_amd64.deb"
+          echo "${RG_SHA256}  ripgrep_${RG_VERSION}-1_amd64.deb" | sha256sum -c -
+          sudo dpkg -i "ripgrep_${RG_VERSION}-1_amd64.deb"
+          rg --version | head -1
       - run: cargo test --all-features

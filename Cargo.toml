@@ -43,6 +43,9 @@ toml = "1.1.3"
 # Time
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
+# Unix process-group signalling (kill a timed-out command's whole tree)
+libc = "0.2.189"
+
 # MCP (Model Context Protocol) client
 rmcp = { version = "2.2.0", default-features = false, features = [
     "client",
@@ -73,6 +76,10 @@ async-trait = { workspace = true }
 toml = { workspace = true }
 chrono = { workspace = true }
 rmcp = { workspace = true }
+
+# Unix-only: process-group kill for timed-out commands.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
