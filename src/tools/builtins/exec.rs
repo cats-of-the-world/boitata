@@ -130,11 +130,16 @@ async fn read_capped<R: AsyncRead + Unpin>(pipe: &mut Option<R>, cap: usize) -> 
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
-                if buf.len() > cap {
-                    let overflow = buf.len() - cap;
-                    buf.drain(..overflow);
-                    truncated = true;
-                }
+// After first truncation, switch to "keep last chunk only" mode:
+if buf.len() + n > cap {
+    // Keep only what fits from the new chunk
+    buf.clear();
+    let start = n.saturating_sub(cap);
+    buf.extend_from_slice(&chunk[start..n]);
+    truncated = true;
+} else {
+    buf.extend_from_slice(&chunk[..n]);
+}
             }
         }
     }
