@@ -73,10 +73,28 @@ impl ToolRegistry {
         }
     }
 
-    /// Register a tool
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
+    /// Register a tool, returning `true` if it was added.
+    ///
+    /// Names are unique keys the model uses to invoke a tool, so a collision
+    /// would otherwise silently overwrite one implementation with another. When
+    /// a tool with the same name is already registered, the existing one is
+    /// **kept**, the duplicate is dropped, and this warns and returns `false`.
+    ///
+    /// Built-in tools have statically distinct names; this guards the dynamic
+    /// paths, where an MCP server's namespaced tool name can collide with a
+    /// built-in or with another server's tool (`mcp.rs` already de-duplicates
+    /// within a single server, but not across servers). Registering built-ins
+    /// before MCP tools therefore means a built-in always wins the name.
+    pub fn register(&mut self, tool: Arc<dyn Tool>) -> bool {
         let name = tool.name().to_string();
+        if self.tools.contains_key(&name) {
+            tracing::warn!(
+                "tool `{name}` is already registered; keeping the existing one and ignoring the duplicate"
+            );
+            return false;
+        }
         self.tools.insert(name, tool);
+        true
     }
 
     /// Execute a tool by name
@@ -156,7 +174,7 @@ mod tests {
             name: "dummy".to_string(),
         });
 
-        registry.register(tool.clone());
+        assert!(registry.register(tool.clone()));
 
         assert!(registry.has_tool("dummy"));
         assert_eq!(registry.list_names(), vec!["dummy".to_string()]);
@@ -164,6 +182,27 @@ mod tests {
         let result = registry.execute("dummy", &serde_json::json!({})).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "success");
+    }
+
+    #[test]
+    fn test_register_rejects_duplicate_names() {
+        let mut registry = ToolRegistry::new();
+        let first = Arc::new(DummyTool {
+            name: "dup".to_string(),
+        });
+        let second = Arc::new(DummyTool {
+            name: "dup".to_string(),
+        });
+
+        assert!(registry.register(first.clone()));
+        // Same name: the duplicate is refused and the first registration is kept.
+        assert!(!registry.register(second));
+        assert_eq!(registry.list_names(), vec!["dup".to_string()]);
+        // The kept tool is the original instance.
+        assert!(Arc::ptr_eq(
+            &registry.tools["dup"],
+            &(first as Arc<dyn Tool>)
+        ));
     }
 
     #[test]
