@@ -188,7 +188,8 @@ impl Tool for CargoAddTool {
             });
         }
         let cwd = exec::opt_str_arg(&arguments, "cwd");
-        let mut args = vec!["add".to_string(), krate.to_string()];
+        let mut args = vec!["add".to_string(), "--".to_string(), krate.to_string()];
+        // Note: '--' must come after all named flags like --dev, --features
         if exec::opt_bool_arg(&arguments, "dev") {
             args.push("--dev".to_string());
         }
