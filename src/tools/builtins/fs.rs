@@ -27,7 +27,11 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file. Returns the file contents as a string."
+        "Read a file's contents. Each line is prefixed with its 1-based line \
+         number (the numbers are for display only and are not part of the file). \
+         Optionally start at `offset` and read at most `limit` lines; at most \
+         2000 lines are returned per call, so page through large files with \
+         `offset`."
     }
 
     fn annotations(&self) -> ToolAnnotations {
@@ -41,6 +45,14 @@ impl Tool for FileReadTool {
                 "path": {
                     "type": "string",
                     "description": "The path to the file to read"
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "1-based line number to start reading from (default 1)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to read (default and cap: 2000)"
                 }
             },
             "required": ["path"]
@@ -60,17 +72,66 @@ impl Tool for FileReadTool {
                 reason: "missing 'path' argument".to_string(),
             })?
             .to_string();
+        // `as_u64` rejects negatives and non-integers; a 0 offset is clamped to
+        // the first line in `format_with_line_numbers`.
+        let offset = arguments
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+        let limit = arguments
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
 
         // `confine` (canonicalize) and the read are blocking; run them off the
         // async executor.
         blocking(move || {
             let path = workspace::confine(&path)?;
-            fs::read_to_string(&path)
-                .map_err(|e| ToolError::ExecutionFailed(format!("failed to read file: {e}")))
+            let content = fs::read_to_string(&path)
+                .map_err(|e| ToolError::ExecutionFailed(format!("failed to read file: {e}")))?;
+            Ok(format_with_line_numbers(&content, offset, limit))
         })
         .await
         .map(ToolOutput::from)
     }
+}
+
+/// Cap on the number of lines returned by a single `file_read`, so reading a
+/// huge file can't blow up the context. Callers page past it with `offset`.
+const MAX_READ_LINES: usize = 2000;
+
+/// Render `content` as numbered lines (`<n>\t<line>`), starting at `offset`
+/// (1-based, default 1) and returning at most `limit` lines (default and hard
+/// cap [`MAX_READ_LINES`]). A trailing note flags any lines past the returned
+/// window so the model knows to page with `offset`.
+fn format_with_line_numbers(content: &str, offset: Option<usize>, limit: Option<usize>) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return "(empty file)".to_string();
+    }
+
+    // 1-based start line, clamped to [1, total].
+    let start = offset.unwrap_or(1).max(1);
+    if start > total {
+        return format!("(offset {start} is past the end of the file, which has {total} line(s))");
+    }
+    let start_idx = start - 1;
+    let want = limit.unwrap_or(MAX_READ_LINES).min(MAX_READ_LINES);
+    let end_idx = start_idx.saturating_add(want).min(total);
+
+    let mut out = String::new();
+    for (i, line) in lines[start_idx..end_idx].iter().enumerate() {
+        out.push_str(&format!("{:>6}\t{}\n", start + i, line));
+    }
+    if end_idx < total {
+        out.push_str(&format!(
+            "... ({} more line(s); use offset={} to continue)",
+            total - end_idx,
+            end_idx + 1
+        ));
+    }
+    out.trim_end().to_string()
 }
 
 /// Tool for writing contents to a file
@@ -239,7 +300,55 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().to_text(), "Hello, World!");
+        // The content is returned with a 1-based line-number prefix.
+        assert_eq!(result.unwrap().to_text(), "     1\tHello, World!");
+    }
+
+    #[test]
+    fn test_format_with_line_numbers_basic() {
+        let out = format_with_line_numbers("a\nb\nc", None, None);
+        assert_eq!(out, "     1\ta\n     2\tb\n     3\tc");
+    }
+
+    #[test]
+    fn test_format_with_line_numbers_offset_and_limit() {
+        // Start at line 2, take 2 lines; a 4th line remains, so a paging note
+        // points at the next offset.
+        let out = format_with_line_numbers("a\nb\nc\nd", Some(2), Some(2));
+        assert_eq!(
+            out,
+            "     2\tb\n     3\tc\n... (1 more line(s); use offset=4 to continue)"
+        );
+    }
+
+    #[test]
+    fn test_format_with_line_numbers_offset_zero_clamps_to_one() {
+        let out = format_with_line_numbers("only", Some(0), None);
+        assert_eq!(out, "     1\tonly");
+    }
+
+    #[test]
+    fn test_format_with_line_numbers_offset_past_end() {
+        let out = format_with_line_numbers("a\nb", Some(5), None);
+        assert!(out.contains("past the end"), "{out}");
+    }
+
+    #[test]
+    fn test_format_with_line_numbers_empty() {
+        assert_eq!(format_with_line_numbers("", None, None), "(empty file)");
+    }
+
+    #[test]
+    fn test_format_with_line_numbers_caps_at_max() {
+        // 3000 lines, no explicit limit: only MAX_READ_LINES are returned, plus a
+        // trailing note pointing at the next page.
+        let content: String = (1..=3000).map(|n| format!("line{n}\n")).collect();
+        let out = format_with_line_numbers(&content, None, None);
+        assert_eq!(out.lines().count(), MAX_READ_LINES + 1); // + trailing note
+        assert!(
+            out.contains(&format!("use offset={}", MAX_READ_LINES + 1)),
+            "{out}"
+        );
     }
 
     #[tokio::test]
