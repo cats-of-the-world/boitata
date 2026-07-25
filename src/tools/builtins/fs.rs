@@ -1,5 +1,6 @@
 // File system tools
 
+use crate::tools::workspace;
 use crate::tools::{Result, Tool, ToolError};
 use async_trait::async_trait;
 use std::fs;
@@ -38,6 +39,7 @@ impl Tool for FileReadTool {
                 name: self.name().to_string(),
                 reason: "missing 'path' argument".to_string(),
             })?;
+        let path = workspace::confine(path)?;
 
         let content = fs::read_to_string(path)
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to read file: {}", e)))?;
@@ -84,6 +86,7 @@ impl Tool for FileWriteTool {
                 name: self.name().to_string(),
                 reason: "missing 'path' argument".to_string(),
             })?;
+        let confined = workspace::confine(path)?;
 
         let content = arguments
             .get("content")
@@ -93,7 +96,7 @@ impl Tool for FileWriteTool {
                 reason: "missing 'content' argument".to_string(),
             })?;
 
-        fs::write(path, content)
+        fs::write(&confined, content)
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to write file: {}", e)))?;
 
         Ok(format!(
@@ -138,6 +141,7 @@ impl Tool for ListDirectoryTool {
                 name: self.name().to_string(),
                 reason: "missing 'path' argument".to_string(),
             })?;
+        let path = workspace::confine(path)?;
 
         let entries = fs::read_dir(path)
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to read directory: {}", e)))?;

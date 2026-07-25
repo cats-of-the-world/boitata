@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::exec;
+use crate::tools::workspace;
 use crate::tools::{Result, Tool, ToolError};
 
 /// Searches file contents with ripgrep (`rg`).
@@ -35,7 +36,11 @@ impl Tool for SearchTool {
 
     async fn execute(&self, arguments: Value) -> Result<String> {
         let pattern = exec::str_arg(&arguments, "pattern", self.name())?;
-        let path = exec::opt_str_arg(&arguments, "path").unwrap_or_else(|| ".".to_string());
+        // Confine the search root to the workspace (no-op unless one is set).
+        let raw_path = exec::opt_str_arg(&arguments, "path").unwrap_or_else(|| ".".to_string());
+        let path = workspace::confine(&raw_path)?
+            .to_string_lossy()
+            .into_owned();
 
         let mut args = vec![
             "--line-number".to_string(),

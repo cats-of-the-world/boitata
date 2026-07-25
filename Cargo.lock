@@ -119,6 +119,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "libc",
  "reqwest 0.12.28",
  "rmcp",
  "serde",

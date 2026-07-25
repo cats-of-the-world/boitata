@@ -22,6 +22,7 @@ use audit::FileAuditLog;
 use config::{Config, McpServerConfig};
 use mcp::McpClient;
 use provider::{AnthropicProvider, OllamaProvider, OpenAIProvider, Provider};
+use tools::workspace;
 use tools::{
     CargoAddTool, CargoCheckTool, CargoClippyTool, CargoFmtTool, CargoTestTool, ExecuteCommandTool,
     FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool, GitStatusTool,
@@ -144,6 +145,25 @@ async fn run_task(
             None
         }
     };
+
+    // Confine the path-taking tools to a workspace root. Secure by default:
+    // confinement is on unless `confine_tools = false`, and the root defaults to
+    // the current working directory when `workspace_root` is unset.
+    let workspace_root = if config.confine_tools.unwrap_or(true) {
+        let root = config
+            .workspace_root
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            });
+        info!("Confining path tools to workspace root: {}", root.display());
+        Some(root)
+    } else {
+        info!("Tool path confinement disabled (confine_tools = false)");
+        None
+    };
+    workspace::init(workspace_root);
 
     // Register the deterministic built-in tools the agent can call.
     let mut tools = ToolRegistry::new();

@@ -157,12 +157,12 @@ impl Tool for GitBranchTool {
         let args = match action.as_str() {
             "list" => vec!["branch".to_string(), "--list".to_string()],
             "create" => {
-                let name = exec::str_arg(&arguments, "name", self.name())?;
-                vec!["checkout".to_string(), "-b".to_string(), name.to_string()]
+                let name = exec::str_arg(&arguments, "name", self.name())?.to_string();
+                vec!["checkout".to_string(), "-b".to_string(), name]
             }
             "switch" => {
-                let name = exec::str_arg(&arguments, "name", self.name())?;
-                vec!["checkout".to_string(), name.to_string()]
+                let name = exec::str_arg(&arguments, "name", self.name())?.to_string();
+                vec!["checkout".to_string(), name]
             }
             other => {
                 return Err(ToolError::InvalidArguments {

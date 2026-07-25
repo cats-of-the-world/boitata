@@ -1,6 +1,7 @@
 // Tools module: Tool registry and built-in tool implementations
 
 pub mod builtins;
+pub mod workspace;
 
 use crate::provider::ToolDefinition;
 use async_trait::async_trait;

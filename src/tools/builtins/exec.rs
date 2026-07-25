@@ -42,6 +42,11 @@ pub(super) async fn run_raw(
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
+    // Put the child in its own process group so a timeout can kill the whole
+    // tree — `sh -c` and anything that forks would otherwise leave orphaned
+    // grandchildren running. `kill_on_drop` only reaps the direct child.
+    #[cfg(unix)]
+    command.process_group(0);
 
     let child = command.spawn().map_err(|e| {
         let hint = if e.kind() == std::io::ErrorKind::NotFound {
@@ -52,16 +57,31 @@ pub(super) async fn run_raw(
         ToolError::ExecutionFailed(format!("failed to launch `{program}`: {e}{hint}"))
     })?;
 
-    // On timeout the future (owning the child) is dropped; `kill_on_drop` reaps it.
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| {
-            ToolError::ExecutionFailed(format!(
+    // The child is its own group leader, so its PID is the group ID.
+    #[cfg(unix)]
+    let pgid = child.id().map(|id| id as i32);
+
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(result) => {
+            result.map_err(|e| ToolError::ExecutionFailed(format!("`{program}` failed: {e}")))?
+        }
+        Err(_elapsed) => {
+            // The wait future (owning the child) is dropped, so `kill_on_drop`
+            // signals the leader; also SIGKILL the whole group for any children.
+            #[cfg(unix)]
+            if let Some(pgid) = pgid {
+                // Safety: signalling a process group is always memory-safe; a
+                // group that's already gone just yields ESRCH, which we ignore.
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+            return Err(ToolError::ExecutionFailed(format!(
                 "`{program}` timed out after {}s",
                 timeout.as_secs()
-            ))
-        })?
-        .map_err(|e| ToolError::ExecutionFailed(format!("`{program}` failed: {e}")))?;
+            )));
+        }
+    };
 
     Ok(Output {
         code: output.status.code(),

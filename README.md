@@ -105,8 +105,19 @@ Built-in tools organized by category:
   it can be disabled via `allow_execute_command = false` in config
 
 Every command-based tool runs with a timeout, captured output (truncated to keep
-the context lean), and no interactive stdin. Non-zero exits (compiler/linter/test
-failures) come back as output — not errors — so the agent can read them and iterate.
+the context lean), and no interactive stdin. On Unix, a timed-out command's whole
+process group is killed so nothing is orphaned. Non-zero exits (compiler/linter/
+test failures) come back as output — not errors — so the agent can read them and
+iterate.
+
+**Path confinement (secure by default).** The path-taking tools (`file_read`,
+`file_write`, `list_directory`, `search`) are confined to a workspace root —
+by default the directory Boitata runs in. Absolute paths, `..` traversal, and
+symlinks that escape the root are rejected. Point it elsewhere with
+`workspace_root`, or disable confinement entirely with `confine_tools = false`.
+Note that `execute_command` runs real shell commands and is **not** bound by this
+confinement; for a locked-down deployment, combine confinement with
+`allow_execute_command = false`.
 
 ### MCP Integration
 Planned support for the Model Context Protocol to connect to external tools and data sources.
@@ -123,6 +134,21 @@ cargo build --release
 
 # The binary will be at ./target/release/boitata
 ```
+
+## Development setup
+
+Boitata needs a Rust toolchain plus a couple of external tools: `ripgrep` (for
+the `search` tool) and `git` (for the `git_*` tools). To set up a new machine
+deterministically:
+
+```bash
+./scripts/setup.sh
+```
+
+This installs the exact Rust toolchain pinned in `rust-toolchain.toml`, installs
+the pinned `ripgrep` version, and checks for `git`. Crate versions are pinned by
+the committed `Cargo.lock`, and CI builds with the same pinned toolchain (rustup
+reads `rust-toolchain.toml` automatically).
 
 ## Configuration
 
