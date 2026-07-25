@@ -224,6 +224,12 @@ impl McpClient {
                 client: Arc::clone(self),
                 name: list_name,
             }));
+        } else {
+            tracing::warn!(
+                "MCP server `{}`: resource list tool collides with existing name `{}`; skipping",
+                self.name,
+                list_name
+            );
         }
 
         let read_name = sanitize_tool_name(&format!("{}_read_resource", self.name));
@@ -232,6 +238,12 @@ impl McpClient {
                 client: Arc::clone(self),
                 name: read_name,
             }));
+        } else {
+            tracing::warn!(
+                "MCP server `{}`: resource read tool collides with existing name `{}`; skipping",
+                self.name,
+                read_name
+            );
         }
 
         tools
@@ -406,8 +418,10 @@ fn resource_contents_text(result: &ReadResourceResult) -> String {
                 mime_type, blob, ..
             } => {
                 let kind = mime_type.as_deref().unwrap_or("binary");
+                // `blob` is the base64-encoded payload, so this is its encoded
+                // character count, not the decoded byte size.
                 parts.push(format!(
-                    "[{kind} resource — {} base64 bytes omitted]",
+                    "[{kind} resource — {} base64 characters omitted]",
                     blob.len()
                 ));
             }
