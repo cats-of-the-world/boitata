@@ -143,6 +143,7 @@ impl Tool for CargoTestTool {
         if let Some(filter) = exec::opt_str_arg(&arguments, "filter") {
             // `--` ends option parsing so a filter like "--help" is treated as a
             // test-name filter rather than a flag.
+        if let Some(filter) = exec::opt_str_arg(&arguments, "filter") {
             args.push("--".to_string());
             args.push(filter);
         }
