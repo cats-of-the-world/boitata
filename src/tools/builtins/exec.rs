@@ -98,8 +98,12 @@ pub(super) async fn run_raw(
             // is still valid), then reap the child.
             #[cfg(unix)]
             if let Some(pgid) = pgid {
-                // Safety: signalling a process group is always memory-safe; a
-                // group that's already gone just yields ESRCH, which we ignore.
+                // Safety: `pgid` is `child.id()`, and `child` is still alive here
+                // (owned, not yet reaped), so its PID/PGID is valid and cannot
+                // have been recycled by the OS; a later refactor that reaps the
+                // child before this kill would reintroduce that race. `libc::kill`
+                // is a raw syscall with no invariants to uphold; a group that's
+                // already gone just yields ESRCH, which we ignore.
                 unsafe {
                     libc::kill(-pgid, libc::SIGKILL);
                 }
@@ -133,22 +137,35 @@ async fn read_capped<R: AsyncRead + Unpin>(pipe: &mut Option<R>, cap: usize) -> 
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
-                if buf.len() > cap {
-                    // Keep only the last `cap` bytes (the tail, where build/test
-                    // errors cluster). Advance the cut to the next UTF-8 char
-                    // boundary so we never split a multi-byte sequence; otherwise
-                    // `from_utf8_lossy` would corrupt the kept output's first char.
-                    let mut cut = buf.len() - cap;
-                    while cut < buf.len() && (buf[cut] & 0xC0) == 0x80 {
-                        cut += 1;
-                    }
-                    buf.drain(..cut);
-                    truncated = true;
+                // Only trim once the buffer reaches 2x the cap, so the O(cap)
+                // memmove is amortized over many chunks instead of running on
+                // every read (a 1 MB stream would otherwise memmove ~cap bytes
+                // ~125 times). A final trim below enforces the exact bound.
+                if buf.len() > cap * 2 {
+                    truncated |= trim_front_to_cap(&mut buf, cap);
                 }
             }
         }
     }
+    // The loop leaves up to 2x cap buffered; trim the tail down to the cap.
+    truncated |= trim_front_to_cap(&mut buf, cap);
     (buf, truncated)
+}
+
+/// Drop the front of `buf` so at most `cap` bytes (the tail, where build/test
+/// errors cluster) remain. Cuts on the next UTF-8 char boundary so a multi-byte
+/// sequence is never split; otherwise `from_utf8_lossy` would corrupt the kept
+/// output's first char. Returns whether any bytes were dropped.
+fn trim_front_to_cap(buf: &mut Vec<u8>, cap: usize) -> bool {
+    if buf.len() <= cap {
+        return false;
+    }
+    let mut cut = buf.len() - cap;
+    while cut < buf.len() && (buf[cut] & 0xC0) == 0x80 {
+        cut += 1;
+    }
+    buf.drain(..cut);
+    true
 }
 
 /// Turn captured bytes into a string, noting up front if earlier output was
@@ -156,7 +173,7 @@ async fn read_capped<R: AsyncRead + Unpin>(pipe: &mut Option<R>, cap: usize) -> 
 fn finalize_stream((bytes, truncated): (Vec<u8>, bool)) -> String {
     let text = String::from_utf8_lossy(&bytes).into_owned();
     if truncated {
-        format!("… (earlier output truncated to the last {MAX_STREAM_BYTES} bytes)\n{text}")
+        format!("... (earlier output truncated to at most {MAX_STREAM_BYTES} bytes)\n{text}")
     } else {
         text
     }

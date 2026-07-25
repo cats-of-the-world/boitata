@@ -31,7 +31,9 @@ use crate::tools::{Result, ToolError};
 static ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Set the workspace root once, at startup. Passing `None` leaves tools
-/// unconfined. Calling more than once is a no-op (the first value wins).
+/// unconfined. Calling more than once is a no-op (the first value wins); a
+/// `static OnceLock` can't be reset, which is why tests exercise the pure
+/// [`confine_within`] instead of the global `confine`/`init` pair.
 pub fn init(root: Option<PathBuf>) {
     let resolved = root.map(|r| {
         // Canonicalize so later `starts_with` checks compare resolved (symlink-
@@ -64,6 +66,12 @@ pub fn init(root: Option<PathBuf>) {
 /// Confine `path` to the configured workspace root, returning the path to
 /// actually use. Unconfined when no root is set. Errors if `path` resolves
 /// outside the root.
+///
+/// Does a little blocking I/O (one `canonicalize` of the existing prefix). It's
+/// cheap next to what the callers do: `exec::run_raw`/git/cargo immediately
+/// spawn a subprocess, and `fs.rs` already runs its whole body (this call plus
+/// the read/write) on `spawn_blocking`. So it is called directly rather than
+/// forcing every caller onto an async signature for one stat.
 pub fn confine(path: &str) -> Result<PathBuf> {
     let root = ROOT.get().and_then(|o| o.as_ref());
     confine_within(root.map(PathBuf::as_path), path)
@@ -96,7 +104,9 @@ fn confine_within(root: Option<&Path>, path: &str) -> Result<PathBuf> {
 
     // NOTE: TOCTOU race — between this check and the caller's open()/read()/write(),
     // a directory component inside the root could be replaced with a symlink
-    // pointing outside it. This module relies on deployment-level isolation
+    // pointing outside it. `file_write` is the most exposed: it accepts a
+    // not-yet-existing tail, so a symlink created there afterward could redirect
+    // the write out of the root. This module relies on deployment-level isolation
     // (container/devbox) as the primary containment; callers should prefer
     // `O_NOFOLLOW` / `openat2(RESOLVE_BENEATH)` when available.
     if resolved.starts_with(root) {

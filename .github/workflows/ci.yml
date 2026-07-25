@@ -8,6 +8,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# These jobs only read the repo, so grant the GITHUB_TOKEN least privilege
+# (overrides a repo default that might otherwise be write-all).
+permissions:
+  contents: read
+
 # The Rust toolchain is pinned by rust-toolchain.toml; each job runs
 # `rustup show` (the runner ships rustup) to install exactly that channel plus
 # the rustfmt/clippy components, so CI matches local builds. Third-party actions
@@ -16,6 +21,7 @@ jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
@@ -24,6 +30,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
@@ -33,6 +40,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - run: rustup show

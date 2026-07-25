@@ -59,7 +59,9 @@ impl Tool for GitDiffTool {
 
     fn description(&self) -> &str {
         "Show git changes as a diff. By default shows unstaged changes; set \
-         `staged` to show staged changes. Optionally limit to a path."
+         `staged` to show staged changes (the two are separate views, not \
+         combined). Untracked files are not shown; use `git_status` to see \
+         those. Optionally limit to a path."
     }
 
     fn input_schema(&self) -> Value {
@@ -178,6 +180,10 @@ impl Tool for GitBranchTool {
             "list" => vec!["branch".to_string(), "--list".to_string()],
             "create" => {
                 let name = self.branch_name(&arguments)?;
+                // No `--` here (unlike `switch`): `name` is the required argument
+                // to `-b`, so git takes it literally rather than as a flag, and
+                // `branch_name` has already rejected any leading `-`. Inserting
+                // `--` would make git read it *as* the branch name and fail.
                 vec!["checkout".to_string(), "-b".to_string(), name]
             }
             "switch" => {

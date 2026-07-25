@@ -74,7 +74,16 @@ impl Tool for SearchTool {
 
         // ripgrep exit codes: 0 = matches, 1 = no matches, 2 = error.
         match output.code {
-            Some(0) => Ok(output.stdout.trim_end().to_string()),
+            Some(0) => {
+                // Exit 0 means matches, but guard against empty/whitespace-only
+                // output so the agent never gets a bare "" with no explanation.
+                let trimmed = output.stdout.trim_end();
+                if trimmed.is_empty() {
+                    Ok("(no matches found)".to_string())
+                } else {
+                    Ok(trimmed.to_string())
+                }
+            }
             Some(1) => Ok("(no matches found)".to_string()),
             _ => {
                 let detail = if output.stderr.trim().is_empty() {

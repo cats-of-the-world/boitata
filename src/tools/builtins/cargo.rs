@@ -194,6 +194,16 @@ impl Tool for CargoAddTool {
         }
         if let Some(features) = arguments.get("features").and_then(|v| v.as_array()) {
             let features: Vec<&str> = features.iter().filter_map(|v| v.as_str()).collect();
+            // Reject option-like feature names for consistency with the crate
+            // check above; a `-`-leading value could surprise cargo's parsing.
+            for f in &features {
+                if f.starts_with('-') {
+                    return Err(ToolError::InvalidArguments {
+                        name: self.name().to_string(),
+                        reason: format!("feature `{f}` must not start with '-'"),
+                    });
+                }
+            }
             if !features.is_empty() {
                 args.push("--features".to_string());
                 args.push(features.join(","));

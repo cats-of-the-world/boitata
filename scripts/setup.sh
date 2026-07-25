@@ -13,6 +13,8 @@
 set -euo pipefail
 
 # Pinned version of ripgrep to install if it's missing or mismatched.
+# Keep in sync with RG_VERSION in .github/workflows/ci.yml (CI installs the same
+# version from a checksum-verified .deb; there is no shared manifest yet).
 RIPGREP_VERSION="14.1.1"
 
 # Run from the repo root so rustup finds rust-toolchain.toml.
@@ -45,10 +47,11 @@ echo "==> Ensuring ripgrep ${RIPGREP_VERSION} (for the search tool)"
 if command -v rg >/dev/null 2>&1 && [ "$(rg --version | head -1 | awk '{print $2}')" = "${RIPGREP_VERSION}" ]; then
     echo "ripgrep ${RIPGREP_VERSION} already installed"
 else
-    # Build from source with the toolchain we just pinned — deterministic and
-    # cross-platform (no per-OS package name or checksum juggling). Note: this
-    # installs into the cargo bin dir and takes precedence over any ripgrep you
-    # installed via a system package manager.
+    # Build from source with the toolchain we just pinned: deterministic and
+    # cross-platform (no per-OS package name or checksum juggling). CI instead
+    # pulls a checksum-verified .deb (Linux-only there); the two paths agree on
+    # the pinned version above. Note: this installs into the cargo bin dir and
+    # takes precedence over any ripgrep from a system package manager.
     if command -v rg >/dev/null 2>&1; then
         echo "note: replacing existing $(rg --version | head -1) with the pinned build"
     fi
