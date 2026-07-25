@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use super::exec;
 use crate::tools::workspace;
 use crate::tools::{Result, Tool, ToolAnnotations, ToolError, ToolOutput};
+use tokio_util::sync::CancellationToken;
 
 /// Shows the working-tree status.
 pub struct GitStatusTool;
@@ -36,7 +37,7 @@ impl Tool for GitStatusTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         exec::run(
             "git",
@@ -47,6 +48,7 @@ impl Tool for GitStatusTool {
             ],
             cwd.as_deref(),
             exec::DEFAULT_TIMEOUT,
+            &cancel,
         )
         .await
     }
@@ -83,7 +85,7 @@ impl Tool for GitDiffTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["diff".to_string()];
         if exec::opt_bool_arg(&arguments, "staged") {
@@ -96,7 +98,7 @@ impl Tool for GitDiffTool {
             args.push("--".to_string());
             args.push(confined.to_string_lossy().into_owned());
         }
-        exec::run("git", args, cwd.as_deref(), exec::DEFAULT_TIMEOUT).await
+        exec::run("git", args, cwd.as_deref(), exec::DEFAULT_TIMEOUT, &cancel).await
     }
 }
 
@@ -135,7 +137,7 @@ impl Tool for GitCommitTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let message = exec::str_arg(&arguments, "message", self.name())?;
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["commit".to_string()];
@@ -144,7 +146,7 @@ impl Tool for GitCommitTool {
         }
         // Attached form so a message starting with `-` can't be read as a flag.
         args.push(format!("--message={message}"));
-        exec::run("git", args, cwd.as_deref(), exec::DEFAULT_TIMEOUT).await
+        exec::run("git", args, cwd.as_deref(), exec::DEFAULT_TIMEOUT, &cancel).await
     }
 }
 
@@ -189,7 +191,7 @@ impl Tool for GitBranchTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let action = exec::opt_str_arg(&arguments, "action").unwrap_or_else(|| "list".to_string());
 
@@ -214,6 +216,6 @@ impl Tool for GitBranchTool {
                 });
             }
         };
-        exec::run("git", args, cwd.as_deref(), exec::DEFAULT_TIMEOUT).await
+        exec::run("git", args, cwd.as_deref(), exec::DEFAULT_TIMEOUT, &cancel).await
     }
 }

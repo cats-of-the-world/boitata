@@ -36,6 +36,7 @@ use tokio::time::timeout;
 use crate::config::{McpServerConfig, McpTransport};
 use crate::provider::{ToolContent, tool_content_text};
 use crate::tools::{Tool, ToolAnnotations, ToolError, ToolOutput};
+use tokio_util::sync::CancellationToken;
 
 /// Maximum length of a tool name exposed to the model (provider schemas cap
 /// names at 64 chars and restrict the character set).
@@ -348,12 +349,23 @@ impl Tool for McpTool {
         self.annotations
     }
 
-    async fn execute(&self, arguments: Value) -> crate::tools::Result<ToolOutput> {
-        self.client
-            .call(&self.remote_name, arguments)
-            .await
-            .map(|content| ToolOutput { content })
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
+    async fn execute(
+        &self,
+        arguments: Value,
+        cancel: CancellationToken,
+    ) -> crate::tools::Result<ToolOutput> {
+        // Race the remote call against cancellation; on cancel the call future is
+        // dropped, aborting the in-flight request.
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(ToolError::ExecutionFailed(format!(
+                "MCP tool `{}` cancelled",
+                self.remote_name
+            ))),
+            result = self.client.call(&self.remote_name, arguments) => result
+                .map(|content| ToolOutput { content })
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string())),
+        }
     }
 }
 
@@ -384,12 +396,20 @@ impl Tool for McpListResourcesTool {
         serde_json::json!({"type": "object", "properties": {}, "required": []})
     }
 
-    async fn execute(&self, _arguments: Value) -> crate::tools::Result<ToolOutput> {
-        self.client
-            .list_resources()
-            .await
-            .map(ToolOutput::from)
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
+    async fn execute(
+        &self,
+        _arguments: Value,
+        cancel: CancellationToken,
+    ) -> crate::tools::Result<ToolOutput> {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(ToolError::ExecutionFailed(
+                "list_resources cancelled".to_string(),
+            )),
+            result = self.client.list_resources() => result
+                .map(ToolOutput::from)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string())),
+        }
     }
 }
 
@@ -425,7 +445,11 @@ impl Tool for McpReadResourceTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> crate::tools::Result<ToolOutput> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        cancel: CancellationToken,
+    ) -> crate::tools::Result<ToolOutput> {
         let uri = arguments
             .get("uri")
             .and_then(|v| v.as_str())
@@ -433,11 +457,15 @@ impl Tool for McpReadResourceTool {
                 name: self.name.clone(),
                 reason: "missing 'uri' argument".to_string(),
             })?;
-        self.client
-            .read_resource(uri)
-            .await
-            .map(ToolOutput::from)
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(ToolError::ExecutionFailed(
+                "read_resource cancelled".to_string(),
+            )),
+            result = self.client.read_resource(uri) => result
+                .map(ToolOutput::from)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string())),
+        }
     }
 }
 
@@ -738,7 +766,7 @@ mod tests {
 
         // Calling the tool round-trips through rmcp and returns the server output.
         let echo = by_name["test_echo"]
-            .execute(serde_json::json!({"text": "hi"}))
+            .execute(serde_json::json!({"text": "hi"}), CancellationToken::new())
             .await
             .expect("call echo")
             .to_text();
@@ -746,7 +774,7 @@ mod tests {
 
         // Listing resources returns the server's resource summary.
         let listed = by_name["test_list_resources"]
-            .execute(serde_json::json!({}))
+            .execute(serde_json::json!({}), CancellationToken::new())
             .await
             .expect("list resources")
             .to_text();
@@ -754,7 +782,10 @@ mod tests {
 
         // Reading a resource returns its contents.
         let body = by_name["test_read_resource"]
-            .execute(serde_json::json!({"uri": "mem://note"}))
+            .execute(
+                serde_json::json!({"uri": "mem://note"}),
+                CancellationToken::new(),
+            )
             .await
             .expect("read resource")
             .to_text();

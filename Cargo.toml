@@ -12,6 +12,8 @@ license = "MIT"
 # Async runtime
 tokio = { version = "1.42", features = ["full"] }
 tokio-stream = "0.1"
+# CancellationToken for cooperative tool cancellation
+tokio-util = "0.7.19"
 
 # HTTP
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -76,6 +78,7 @@ async-trait = { workspace = true }
 toml = { workspace = true }
 chrono = { workspace = true }
 rmcp = { workspace = true }
+tokio-util = { workspace = true }
 
 # Unix-only: process-group kill for timed-out commands.
 [target.'cfg(unix)'.dependencies]

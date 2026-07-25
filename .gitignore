@@ -1,5 +1,10 @@
 /target
 
+# Local Claude Code / agent config (settings.local.json and its atomic-write
+# temp files). Committed skills under .claude/ are already tracked and stay so.
+.claude/settings.local.json
+.claude/settings.local.json.tmp.*
+
 # Local config with credentials — never commit
 boitata.toml
 
