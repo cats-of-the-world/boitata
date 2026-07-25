@@ -6,6 +6,7 @@ mod agent;
 mod audit;
 mod config;
 mod context;
+mod mcp;
 mod provider;
 mod tools;
 
@@ -14,11 +15,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use tracing::info;
+use tracing::{info, warn};
 
 use agent::{Agent, Task};
 use audit::FileAuditLog;
-use config::Config;
+use config::{Config, McpServerConfig};
+use mcp::McpClient;
 use provider::{AnthropicProvider, OllamaProvider, OpenAIProvider, Provider};
 use tools::{FileReadTool, FileWriteTool, ListDirectoryTool, ToolRegistry};
 
@@ -145,6 +147,16 @@ async fn run_task(
     tools.register(Arc::new(FileWriteTool));
     tools.register(Arc::new(ListDirectoryTool));
 
+    // Connect any configured MCP servers and register their tools. A server we
+    // can't reach is logged and skipped so one broken server can't abort the
+    // run. The registered tools keep the connections alive for the run.
+    for server in &config.mcp_servers {
+        match connect_mcp(server, &mut tools).await {
+            Ok(count) => info!("MCP server `{}` connected: {count} tool(s)", server.name),
+            Err(e) => warn!("MCP server `{}` unavailable: {e:#}", server.name),
+        }
+    }
+
     let mut agent = Agent::new(provider, tools);
     if let Some(audit) = audit {
         agent = agent.with_audit(audit);
@@ -178,6 +190,19 @@ async fn run_task(
     }
 
     Ok(())
+}
+
+/// Connect to one MCP server and register its tools into `tools`. Returns the
+/// number of tools discovered. The registered tools own the connection, keeping
+/// the server alive for the duration of the run.
+async fn connect_mcp(server: &McpServerConfig, tools: &mut ToolRegistry) -> anyhow::Result<usize> {
+    let client = McpClient::connect(server).await?;
+    let mcp_tools = client.discover_tools().await?;
+    let count = mcp_tools.len();
+    for tool in mcp_tools {
+        tools.register(tool);
+    }
+    Ok(count)
 }
 
 /// Construct a provider from config. API-key providers read the key from

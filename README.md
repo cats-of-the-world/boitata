@@ -231,6 +231,47 @@ model    = "llama3.2"
 base_url = "http://localhost:11434"
 ```
 
+### MCP servers
+
+Boitata connects to [MCP](https://modelcontextprotocol.io) servers using the
+official [`rmcp`](https://crates.io/crates/rmcp) client. Each server's tools are
+discovered at startup and exposed to the agent — namespaced as `<server>_<tool>`
+— and called through the same agent loop as built-in tools (so **MCP tool calls
+show up in the audit log** too). A server that fails to start is logged and
+skipped, so one broken server can't abort a run.
+
+Two transports are supported, inferred from which field you set on a
+`[[mcp_servers]]` block:
+
+- **`command`** → **stdio**: the server is spawned as a subprocess.
+- **`url`** → **Streamable HTTP**: connect to a remote server.
+
+Set exactly one of the two per server.
+
+```toml
+# stdio (subprocess)
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[mcp_servers]]
+name = "git"
+command = "uvx"
+args = ["mcp-server-git"]
+env = { GIT_AUTHOR_NAME = "boitata" }
+
+# remote (Streamable HTTP)
+[[mcp_servers]]
+name = "remote"
+url = "https://mcp.example.com/mcp"
+auth_token = "your-token"          # sent as `Authorization: Bearer <token>`
+headers = { X-Workspace = "acme" } # optional extra headers
+```
+
+On startup you'll see a line like `MCP server \`filesystem\` connected: 12 tool(s)`.
+Credentials (`auth_token`) live in the git-ignored `boitata.toml` and are never logged.
+
 ## Roadmap
 
 ### Sprint 1: Foundation ✅
@@ -246,8 +287,9 @@ base_url = "http://localhost:11434"
 - [ ] Command execution with safety checks
 
 ### Sprint 3: MCP Integration
-- [ ] MCP client implementation
-- [ ] Tool discovery and registration
+- [x] MCP client implementation (via `rmcp`)
+- [x] Tool discovery and registration
+- [x] Remote transport (Streamable HTTP) + stdio
 - [ ] Resource access for context gathering
 
 ### Sprint 4: Blueprint System

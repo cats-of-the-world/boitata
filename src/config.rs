@@ -4,8 +4,9 @@
 // directory) so credentials never need to be passed on the command line. The
 // file is git-ignored; commit `boitata.example.toml` as a template instead.
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use serde::Deserialize;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Environment variable holding an alternate config file path.
@@ -16,7 +17,10 @@ const API_KEY_ENV: &str = "BOITATA_API_KEY";
 const DEFAULT_CONFIG_FILE: &str = "boitata.toml";
 
 /// Top-level Boitata configuration.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Debug` is implemented manually to redact the API key — never derive it, or
+/// the secret leaks anywhere the config is logged or formatted.
+#[derive(Clone, Deserialize)]
 pub struct Config {
     /// Provider to use: `anthropic`, `openai`, or `ollama`.
     pub provider: String,
@@ -40,6 +44,123 @@ pub struct Config {
     /// Path to the JSONL audit log (optional; defaults to `boitata-audit.log`).
     #[serde(default)]
     pub audit_log: Option<String>,
+    /// MCP servers to connect to. Their tools are exposed to the agent.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+/// A single MCP server. The transport is inferred from which field is set:
+/// `command` → stdio (subprocess), `url` → Streamable HTTP (remote). Exactly one
+/// of the two must be present; [`McpServerConfig::transport`] validates this and
+/// projects the flat config into the [`McpTransport`] enum.
+///
+/// `Debug` is implemented manually to redact `auth_token` and the values of
+/// `env`/`headers`, which routinely carry credentials.
+#[derive(Clone, Default, Deserialize)]
+pub struct McpServerConfig {
+    /// Short identifier used to namespace this server's tools (e.g. `git`).
+    pub name: String,
+
+    // --- stdio transport ---
+    /// Executable to run (e.g. `npx`, `uvx`, an absolute path).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Arguments passed to the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables for the server process.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+
+    // --- Streamable HTTP transport ---
+    /// URL of a remote MCP server (Streamable HTTP endpoint).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Bearer token sent as `Authorization: Bearer <token>` (no prefix here).
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    /// Extra HTTP headers to send with every request.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+/// A validated MCP transport borrowed from an [`McpServerConfig`]: exactly one
+/// of stdio or HTTP. Constructed only via [`McpServerConfig::transport`], so
+/// downstream code (e.g. `McpClient::connect`) never handles the "both" or
+/// "neither" states.
+pub enum McpTransport<'a> {
+    Stdio {
+        command: &'a str,
+        args: &'a [String],
+        env: &'a HashMap<String, String>,
+    },
+    Http {
+        url: &'a str,
+        auth_token: Option<&'a str>,
+        headers: &'a HashMap<String, String>,
+    },
+}
+
+impl McpServerConfig {
+    /// Validate the transport fields and project into [`McpTransport`]. Errors if
+    /// neither or both of `command`/`url` are set.
+    pub fn transport(&self) -> anyhow::Result<McpTransport<'_>> {
+        match (&self.url, &self.command) {
+            (Some(_), Some(_)) => bail!(
+                "MCP server `{}` sets both `url` and `command`; use exactly one",
+                self.name
+            ),
+            (Some(url), None) => Ok(McpTransport::Http {
+                url,
+                auth_token: self.auth_token.as_deref(),
+                headers: &self.headers,
+            }),
+            (None, Some(command)) => Ok(McpTransport::Stdio {
+                command,
+                args: &self.args,
+                env: &self.env,
+            }),
+            (None, None) => bail!(
+                "MCP server `{}` must set either `command` (stdio) or `url` (http)",
+                self.name
+            ),
+        }
+    }
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            // Redacted: only whether a key is present, never its value.
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("base_url", &self.base_url)
+            .field("max_tokens", &self.max_tokens)
+            .field("max_iterations", &self.max_iterations)
+            .field("system_prompt", &self.system_prompt)
+            .field("audit_log", &self.audit_log)
+            .field("mcp_servers", &self.mcp_servers)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Show keys but redact values for maps that may hold credentials.
+        let redact = |map: &HashMap<String, String>| -> BTreeMap<String, &'static str> {
+            map.keys().map(|k| (k.clone(), "***")).collect()
+        };
+        f.debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &redact(&self.env))
+            .field("url", &self.url)
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "***"))
+            .field("headers", &redact(&self.headers))
+            .finish()
+    }
 }
 
 impl Config {
@@ -110,5 +231,75 @@ mod tests {
             Config::resolve_path(Some("custom.toml".to_string())),
             PathBuf::from("custom.toml")
         );
+    }
+
+    #[test]
+    fn test_transport_infers_stdio_and_http() {
+        let stdio = McpServerConfig {
+            name: "x".to_string(),
+            command: Some("npx".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            stdio.transport().unwrap(),
+            McpTransport::Stdio { .. }
+        ));
+
+        let http = McpServerConfig {
+            name: "x".to_string(),
+            url: Some("https://h/mcp".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            http.transport().unwrap(),
+            McpTransport::Http { .. }
+        ));
+    }
+
+    #[test]
+    fn test_transport_requires_exactly_one() {
+        let neither = McpServerConfig {
+            name: "x".to_string(),
+            ..Default::default()
+        };
+        let err = neither.transport().err().unwrap().to_string();
+        assert!(err.contains("command") && err.contains("url"), "{err}");
+
+        let both = McpServerConfig {
+            name: "x".to_string(),
+            command: Some("true".to_string()),
+            url: Some("https://h/mcp".to_string()),
+            ..Default::default()
+        };
+        let err = both.transport().err().unwrap().to_string();
+        assert!(err.contains("both"), "{err}");
+    }
+
+    #[test]
+    fn test_debug_redacts_secrets() {
+        let config = Config {
+            provider: "openai".to_string(),
+            model: "glm-4.6".to_string(),
+            api_key: Some("super-secret-key".to_string()),
+            base_url: None,
+            max_tokens: None,
+            max_iterations: None,
+            system_prompt: None,
+            audit_log: None,
+            mcp_servers: vec![McpServerConfig {
+                name: "remote".to_string(),
+                url: Some("https://h/mcp".to_string()),
+                auth_token: Some("super-secret-token".to_string()),
+                headers: HashMap::from([("X-Api-Key".to_string(), "hdr-secret".to_string())]),
+                ..Default::default()
+            }],
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("super-secret-key"), "{rendered}");
+        assert!(!rendered.contains("super-secret-token"), "{rendered}");
+        assert!(!rendered.contains("hdr-secret"), "{rendered}");
+        // Non-secret metadata is still visible for debugging.
+        assert!(rendered.contains("X-Api-Key"), "{rendered}");
+        assert!(rendered.contains("glm-4.6"), "{rendered}");
     }
 }
