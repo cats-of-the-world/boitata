@@ -37,7 +37,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # ripgrep backs the `search` tool; install it so its test runs (and any
-      # future search-dependent tests) instead of being skipped.
-      - run: sudo apt-get update && sudo apt-get install -y ripgrep
+      # ripgrep backs the `search` tool; install a pinned release so its test
+      # runs deterministically (rather than whatever version apt currently ships).
+      - name: Install ripgrep (pinned)
+        run: |
+          RG_VERSION=14.1.1
+          curl -fsSLO "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep_${RG_VERSION}-1_amd64.deb"
+          sudo dpkg -i "ripgrep_${RG_VERSION}-1_amd64.deb"
+          rg --version | head -1
       - run: cargo test --all-features

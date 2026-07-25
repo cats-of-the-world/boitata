@@ -119,14 +119,30 @@ impl Tool for GitCommitTool {
         if exec::opt_bool_arg(&arguments, "all") {
             args.push("--all".to_string());
         }
-        args.push("--message".to_string());
-        args.push(message.to_string());
+        // Attached form so a message starting with `-` can't be read as a flag.
+        args.push(format!("--message={message}"));
         exec::run("git", args, cwd.as_deref(), exec::DEFAULT_TIMEOUT).await
     }
 }
 
 /// Lists, creates, or switches branches.
 pub struct GitBranchTool;
+
+impl GitBranchTool {
+    /// Read and validate the `name` argument. Rejects names starting with `-`,
+    /// which git would otherwise parse as an option (and which are invalid
+    /// branch names anyway).
+    fn branch_name(&self, arguments: &Value) -> Result<String> {
+        let name = exec::str_arg(arguments, "name", self.name())?;
+        if name.starts_with('-') {
+            return Err(ToolError::InvalidArguments {
+                name: self.name().to_string(),
+                reason: format!("branch name `{name}` must not start with '-'"),
+            });
+        }
+        Ok(name.to_string())
+    }
+}
 
 #[async_trait]
 impl Tool for GitBranchTool {
@@ -157,11 +173,11 @@ impl Tool for GitBranchTool {
         let args = match action.as_str() {
             "list" => vec!["branch".to_string(), "--list".to_string()],
             "create" => {
-                let name = exec::str_arg(&arguments, "name", self.name())?.to_string();
+                let name = self.branch_name(&arguments)?;
                 vec!["checkout".to_string(), "-b".to_string(), name]
             }
             "switch" => {
-                let name = exec::str_arg(&arguments, "name", self.name())?.to_string();
+                let name = self.branch_name(&arguments)?;
                 vec!["checkout".to_string(), name]
             }
             other => {

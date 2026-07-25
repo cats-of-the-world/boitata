@@ -55,6 +55,9 @@ impl Tool for SearchTool {
             args.push("--glob".to_string());
             args.push(glob);
         }
+        // End flag parsing so a pattern/path starting with `-` (e.g. "--json")
+        // is treated as a positional argument, not a ripgrep flag.
+        args.push("--".to_string());
         args.push(pattern.to_string());
         args.push(path);
 

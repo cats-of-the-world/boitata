@@ -152,7 +152,6 @@ async fn run_task(
     let workspace_root = if config.confine_tools.unwrap_or(true) {
         let root = config
             .workspace_root
-            .clone()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -184,7 +183,9 @@ async fn run_task(
     tools.register(Arc::new(CargoFmtTool));
     tools.register(Arc::new(CargoTestTool));
     tools.register(Arc::new(CargoAddTool));
-    // Arbitrary command execution — opt-out via config for restricted deployments.
+    // Arbitrary shell execution is enabled by default so the agent is fully
+    // capable out of the box; disable it for restricted deployments with
+    // `allow_execute_command = false`.
     if config.allow_execute_command.unwrap_or(true) {
         tools.register(Arc::new(ExecuteCommandTool));
     } else {

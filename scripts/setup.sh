@@ -19,6 +19,10 @@ cd "$(dirname "$0")/.."
 echo "==> Ensuring rustup and the pinned Rust toolchain"
 if ! command -v rustup >/dev/null 2>&1; then
     echo "Installing rustup..."
+    # NOTE: this is the official rustup install method (curl | sh). It trusts the
+    # transport and origin; `--proto '=https' --tlsv1.2` guard the network path
+    # but not a compromised origin. If that's a concern, install rustup from your
+    # OS package manager first and re-run this script.
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
     # shellcheck disable=SC1091
     source "${CARGO_HOME:-$HOME/.cargo}/env"
@@ -26,14 +30,25 @@ fi
 # `rustup show` materializes the channel + components pinned in
 # rust-toolchain.toml, installing them if missing.
 rustup show >/dev/null
+# Ensure cargo is on PATH even when rustup was pre-installed but its bin dir
+# isn't exported in this shell (otherwise the cargo install below would fail).
+if ! command -v cargo >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "${CARGO_HOME:-$HOME/.cargo}/env" 2>/dev/null || true
+fi
 
 echo "==> Ensuring ripgrep ${RIPGREP_VERSION} (for the search tool)"
 if command -v rg >/dev/null 2>&1 && rg --version | head -1 | grep -q "ripgrep ${RIPGREP_VERSION}"; then
     echo "ripgrep ${RIPGREP_VERSION} already installed"
 else
     # Build from source with the toolchain we just pinned — deterministic and
-    # cross-platform (no per-OS package name or checksum juggling).
-    cargo install ripgrep --version "${RIPGREP_VERSION}" --locked
+    # cross-platform (no per-OS package name or checksum juggling). Note: this
+    # installs into the cargo bin dir and takes precedence over any ripgrep you
+    # installed via a system package manager.
+    if command -v rg >/dev/null 2>&1; then
+        echo "note: replacing existing $(rg --version | head -1) with the pinned build"
+    fi
+    cargo install ripgrep --version "${RIPGREP_VERSION}" --locked --force
 fi
 
 echo "==> Checking git (for the git tools)"

@@ -13,7 +13,9 @@ use crate::tools::{Result, ToolError};
 pub(super) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Longer limit for cargo commands, which may compile from scratch.
 pub(super) const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
-/// Cap on captured stdout/stderr so a chatty command can't blow up the context.
+/// Approximate cap on captured stdout/stderr so a chatty command can't blow up
+/// the context. The kept tail is at most this many bytes; a short "truncated"
+/// note may push the final string a handful of bytes over.
 const MAX_STREAM_BYTES: usize = 30_000;
 
 /// Raw result of running a subprocess (streams already truncated).
@@ -40,6 +42,9 @@ pub(super) async fn run_raw(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     if let Some(dir) = cwd {
+        // Confine the working directory to the workspace root, consistently with
+        // the path-taking tools (no-op unless a root is configured).
+        let dir = crate::tools::workspace::confine(dir)?;
         command.current_dir(dir);
     }
     // Put the child in its own process group so a timeout can kill the whole

@@ -101,8 +101,8 @@ Built-in tools organized by category:
 - `git_branch` - List / create / switch branches
 
 **Command Execution (Semi-Deterministic)**
-- `execute_command` - Run shell commands; runs with the agent's privileges, so
-  it can be disabled via `allow_execute_command = false` in config
+- `execute_command` - Run shell commands; runs with the agent's privileges.
+  Enabled by default — disable with `allow_execute_command = false`
 
 Every command-based tool runs with a timeout, captured output (truncated to keep
 the context lean), and no interactive stdin. On Unix, a timed-out command's whole
@@ -116,8 +116,8 @@ by default the directory Boitata runs in. Absolute paths, `..` traversal, and
 symlinks that escape the root are rejected. Point it elsewhere with
 `workspace_root`, or disable confinement entirely with `confine_tools = false`.
 Note that `execute_command` runs real shell commands and is **not** bound by this
-confinement; for a locked-down deployment, combine confinement with
-`allow_execute_command = false`.
+confinement. It's enabled by default for full capability; for a locked-down
+deployment, combine the confinement with `allow_execute_command = false`.
 
 ### MCP Integration
 Planned support for the Model Context Protocol to connect to external tools and data sources.
