@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::state::{State, Status, Update, render};
 use crate::agent::{Agent, Task};
-use crate::audit::AuditSink;
+use crate::audit::{AuditSink, NodeKind};
 use crate::provider::Provider;
 use crate::tools::{ToolPolicy, ToolRegistry, run_script};
 
@@ -36,8 +36,8 @@ pub trait Node: Send + Sync {
     /// Unique id of this node within its graph.
     fn name(&self) -> &str;
 
-    /// Node kind label ("agent" | "tool" | "script"), for audit/logging.
-    fn kind(&self) -> &'static str;
+    /// Node kind, for audit/logging.
+    fn kind(&self) -> NodeKind;
 
     /// Execute the node against the current state, returning a state update.
     async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update>;
@@ -65,8 +65,8 @@ impl Node for AgentNode {
         &self.name
     }
 
-    fn kind(&self) -> &'static str {
-        "agent"
+    fn kind(&self) -> NodeKind {
+        NodeKind::Agent
     }
 
     async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
@@ -127,24 +127,22 @@ impl Node for ToolNode {
         &self.name
     }
 
-    fn kind(&self) -> &'static str {
-        "tool"
+    fn kind(&self) -> NodeKind {
+        NodeKind::Tool
     }
 
+    /// Status reflects whether the tool *executed*, not the exit code of any
+    /// command it wrapped: command-backed tools (cargo_*, git_*) report a failing
+    /// command as normal output text rather than an error, so this node reports
+    /// `Ok` for them. Use a [`ScriptNode`] when routing must depend on a command's
+    /// exit code.
     async fn run(&self, _state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
         match cx
             .tools
             .execute(&self.tool, &self.args, cx.cancel.clone())
             .await
         {
-            Ok(output) => {
-                let text = output.to_text();
-                // Command-backed tools (cargo_*, git_*, execute_command) report a
-                // non-zero exit in their output text rather than as an error, so
-                // treat that as a failure for routing.
-                let status = status_from_output(&text);
-                Ok(Update::from_node(&self.name, text, status))
-            }
+            Ok(output) => Ok(Update::from_node(&self.name, output.to_text(), Status::Ok)),
             Err(e) => Ok(Update::from_node(
                 &self.name,
                 format!("error: {e}"),
@@ -175,10 +173,15 @@ impl Node for ScriptNode {
         &self.name
     }
 
-    fn kind(&self) -> &'static str {
-        "script"
+    fn kind(&self) -> NodeKind {
+        NodeKind::Script
     }
 
+    /// The script is run via `sh -c` after templating (`render`) with `{task}`
+    /// and `{<var>}`. Interpolated values are NOT shell-escaped, so a template
+    /// that inlines an untrusted value (e.g. an agent/tool output that contains
+    /// shell metacharacters) can inject commands. Keep script templates author-
+    /// controlled and avoid interpolating untrusted node outputs into them.
     async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
         let script = render(&self.script, state);
         let result = run_script(&script, None, &cx.cancel).await?;
@@ -188,29 +191,5 @@ impl Node for ScriptNode {
             Status::Failed
         };
         Ok(Update::from_node(&self.name, result.output, status))
-    }
-}
-
-/// Derive a status from a command-backed tool's output text. The exec layer
-/// prefixes non-zero exits with `[exit code N]` and signal deaths with
-/// `[terminated by signal]`; anything else is treated as success.
-fn status_from_output(text: &str) -> Status {
-    if text.starts_with("[exit code ") || text.starts_with("[terminated by signal]") {
-        Status::Failed
-    } else {
-        Status::Ok
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_reads_exit_marker() {
-        assert_eq!(status_from_output("[exit code 101]\nerror"), Status::Failed);
-        assert_eq!(status_from_output("[terminated by signal]"), Status::Failed);
-        assert_eq!(status_from_output("all good"), Status::Ok);
-        assert_eq!(status_from_output(""), Status::Ok);
     }
 }

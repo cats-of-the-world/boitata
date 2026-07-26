@@ -284,13 +284,14 @@ async fn run_blueprint(
         println!("[{node}]\n{text}\n");
     }
     match state.status {
-        Some(blueprint::Status::Failed) => {
-            bail!("Blueprint `{name}` finished with a failing step");
-        }
-        _ => {
+        Some(blueprint::Status::Ok) => {
             println!("Blueprint `{name}` completed.");
             Ok(())
         }
+        Some(blueprint::Status::Failed) => {
+            bail!("Blueprint `{name}` finished with a failing step");
+        }
+        None => bail!("Blueprint `{name}` finished with no node having run"),
     }
 }
 

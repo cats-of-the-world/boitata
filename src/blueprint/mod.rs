@@ -21,7 +21,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::audit::{AuditEvent, AuditSink};
+use crate::audit::{AuditEvent, AuditSink, CompletionReason, NodeStatus};
 use crate::provider::Provider;
 use crate::tools::{ToolPolicy, ToolRegistry};
 
@@ -66,6 +66,7 @@ impl Graph {
             entry: entry.into(),
             nodes: HashMap::new(),
             edges: HashMap::new(),
+            duplicates: Vec::new(),
         }
     }
 }
@@ -76,12 +77,18 @@ pub struct GraphBuilder {
     entry: String,
     nodes: HashMap<String, Box<dyn Node>>,
     edges: HashMap<String, Routing>,
+    /// Node names that were added more than once; rejected by `build`.
+    duplicates: Vec<String>,
 }
 
 impl GraphBuilder {
-    /// Add a node, keyed by its own name.
+    /// Add a node, keyed by its own name. Adding two nodes with the same name is
+    /// a mistake that `build` rejects (rather than silently dropping one).
     pub fn node(mut self, node: impl Node + 'static) -> Self {
-        self.nodes.insert(node.name().to_string(), Box::new(node));
+        let name = node.name().to_string();
+        if self.nodes.insert(name.clone(), Box::new(node)).is_some() {
+            self.duplicates.push(name);
+        }
         self
     }
 
@@ -109,6 +116,12 @@ impl GraphBuilder {
     pub fn build(self) -> Result<Graph, BlueprintError> {
         let known = |id: &str| id == END || self.nodes.contains_key(id);
 
+        if !self.duplicates.is_empty() {
+            return Err(BlueprintError::Invalid(format!(
+                "duplicate node name(s): {}",
+                self.duplicates.join(", ")
+            )));
+        }
         if !self.nodes.contains_key(&self.entry) {
             return Err(BlueprintError::Invalid(format!(
                 "entry `{}` is not a node",
@@ -238,12 +251,16 @@ impl Executor {
             cancel: cancel.clone(),
         };
 
+        // `steps` in the completion events is the number of nodes executed. The
+        // normal path reaches END at the top of iteration `step` having run `step`
+        // nodes; the cancelled path is mid-iteration having run `step + 1`; the
+        // step-limit path has run `max_steps`. All three are that same count.
         let mut current = graph.entry.clone();
         for step in 0..self.max_steps {
             if current == END {
                 self.emit(AuditEvent::BlueprintCompleted {
                     steps: step,
-                    reason: "completed".to_string(),
+                    reason: CompletionReason::Completed,
                 });
                 return Ok(state);
             }
@@ -252,31 +269,31 @@ impl Executor {
                 .nodes
                 .get(&current)
                 .ok_or_else(|| BlueprintError::UnknownNode(current.clone()))?;
-            debug!(
-                "Blueprint step {}: node `{current}` ({})",
-                step + 1,
-                node.kind()
-            );
+            let kind = node.kind();
+            debug!("Blueprint step {}: node `{current}` ({kind:?})", step + 1);
 
             let update = node.run(&state, &cx).await?;
             state.apply(update);
-            let status = state.status.map(Status::label).unwrap_or("ok").to_string();
+            let status = match state.status {
+                Some(Status::Failed) => NodeStatus::Failed,
+                _ => NodeStatus::Ok,
+            };
 
             // Stop if cancelled while the node was running.
             if cancel.is_cancelled() {
                 warn!("Blueprint cancelled at node `{current}`");
                 self.emit(AuditEvent::BlueprintCompleted {
                     steps: step + 1,
-                    reason: "cancelled".to_string(),
+                    reason: CompletionReason::Cancelled,
                 });
                 return Ok(state);
             }
 
-            let next = self.route(graph, &current, &state)?;
+            let next = Self::route(graph, &current, &state)?;
             self.emit(AuditEvent::NodeExecuted {
                 step: step + 1,
                 node: current.clone(),
-                kind: node.kind().to_string(),
+                kind,
                 status,
                 next: next.clone(),
             });
@@ -289,14 +306,14 @@ impl Executor {
         );
         self.emit(AuditEvent::BlueprintCompleted {
             steps: self.max_steps,
-            reason: "step_limit".to_string(),
+            reason: CompletionReason::StepLimit,
         });
         Err(BlueprintError::StepLimit(self.max_steps).into())
     }
 
     /// Pick the next node after `current`. A node with no outgoing edge ends the
     /// run.
-    fn route(&self, graph: &Graph, current: &str, state: &State) -> anyhow::Result<String> {
+    fn route(graph: &Graph, current: &str, state: &State) -> anyhow::Result<String> {
         let next = match graph.edges.get(current) {
             Some(Routing::Static(to)) => to.clone(),
             Some(Routing::Conditional(router)) => router(state),
@@ -313,6 +330,7 @@ impl Executor {
 mod tests {
     use super::state::Update;
     use super::*;
+    use crate::audit::NodeKind;
     use crate::provider::{Chunk, CompletionRequest, CompletionResponse, ProviderResult};
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -361,8 +379,8 @@ mod tests {
         fn name(&self) -> &str {
             &self.name
         }
-        fn kind(&self) -> &'static str {
-            "test"
+        fn kind(&self) -> NodeKind {
+            NodeKind::Tool
         }
         async fn run(&self, _state: &State, _cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
             self.runs.fetch_add(1, Ordering::SeqCst);
@@ -415,8 +433,8 @@ mod tests {
             fn name(&self) -> &str {
                 "check"
             }
-            fn kind(&self) -> &'static str {
-                "test"
+            fn kind(&self) -> NodeKind {
+                NodeKind::Tool
             }
             async fn run(&self, _s: &State, _c: &NodeCtx<'_>) -> anyhow::Result<Update> {
                 let n = self.attempts.fetch_add(1, Ordering::SeqCst);
@@ -523,6 +541,26 @@ mod tests {
                 .edge("a", "nope")
                 .build()
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn build_rejects_duplicate_node_names() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let result = Graph::builder("g", "a")
+            .node(CountingNode {
+                name: "a".into(),
+                status: Status::Ok,
+                runs: runs.clone(),
+            })
+            .node(CountingNode {
+                name: "a".into(),
+                status: Status::Ok,
+                runs,
+            })
+            .build();
+        assert!(
+            matches!(result, Err(BlueprintError::Invalid(msg)) if msg.contains("duplicate node"))
         );
     }
 }

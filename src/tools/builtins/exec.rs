@@ -430,6 +430,7 @@ fn format_output(output: &Output) -> String {
 
 /// Result of a script run: the process exit code (`None` if killed by a signal)
 /// and the combined output text (formatted like the command tools).
+#[derive(Debug)]
 pub struct ScriptResult {
     pub code: Option<i32>,
     pub output: String,

@@ -14,16 +14,6 @@ pub enum Status {
     Failed,
 }
 
-impl Status {
-    /// Short label for audit/logging.
-    pub fn label(self) -> &'static str {
-        match self {
-            Status::Ok => "ok",
-            Status::Failed => "failed",
-        }
-    }
-}
-
 /// One entry in the running transcript: which node produced it and the text.
 #[derive(Debug, Clone)]
 pub struct TranscriptEntry {
@@ -105,11 +95,41 @@ impl Update {
 
 /// Substitute `{task}` and `{<var>}` placeholders in `template` from `state`.
 /// Unknown placeholders are left untouched.
+///
+/// Single pass over the template: substituted values are never re-scanned, so a
+/// value that itself contains `{...}` cannot trigger further substitution and the
+/// result does not depend on `vars` iteration order.
 pub fn render(template: &str, state: &State) -> String {
-    let mut out = template.replace("{task}", &state.task);
-    for (key, value) in &state.vars {
-        out = out.replace(&format!("{{{key}}}"), value);
+    let resolve = |key: &str| -> Option<&str> {
+        if key == "task" {
+            Some(state.task.as_str())
+        } else {
+            state.vars.get(key).map(String::as_str)
+        }
+    };
+
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        match rest[open..].find('}') {
+            Some(close) => {
+                let key = &rest[open + 1..open + close];
+                match resolve(key) {
+                    Some(value) => out.push_str(value),
+                    // Unknown placeholder: keep it verbatim.
+                    None => out.push_str(&rest[open..open + close + 1]),
+                }
+                rest = &rest[open + close + 1..];
+            }
+            // No closing brace: emit the remainder (from the brace) as-is.
+            None => {
+                out.push_str(&rest[open..]);
+                return out;
+            }
+        }
     }
+    out.push_str(rest);
     out
 }
 
@@ -145,5 +165,21 @@ mod tests {
             rendered,
             "Task: fix the bug. Last check: exit code 1. Unknown: {nope}"
         );
+    }
+
+    #[test]
+    fn render_does_not_rescan_substituted_values() {
+        // A value that itself looks like a placeholder must not be re-substituted,
+        // and the result must not depend on vars iteration order.
+        let mut state = State::new("t".to_string());
+        state.vars.insert("a".to_string(), "{b}".to_string());
+        state.vars.insert("b".to_string(), "SECRET".to_string());
+        assert_eq!(render("{a}", &state), "{b}");
+    }
+
+    #[test]
+    fn render_handles_unclosed_brace() {
+        let state = State::new("t".to_string());
+        assert_eq!(render("a {b", &state), "a {b");
     }
 }
