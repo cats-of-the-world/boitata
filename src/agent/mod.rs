@@ -284,7 +284,7 @@ impl Agent {
                 // is reported to the model as an error result (so it can adapt)
                 // and the tool never runs.
                 let annotations = self.tools.annotations(&tool_call.name);
-                let (output, is_error) =
+                let (output, is_error, denied) =
                     match self
                         .policy
                         .decide(&tool_call.name, annotations, &tool_call.arguments)
@@ -301,15 +301,15 @@ impl Agent {
                                 arguments: tool_call.arguments.to_string(),
                                 reason,
                             });
-                            (output, true)
+                            (output, true, true)
                         }
                         Decision::Allow => {
                             match self
                                 .execute_tool_call(tool_call.clone(), cancel.clone())
                                 .await
                             {
-                                Ok(output) => (output, false),
-                                Err(e) => (ToolOutput::text(format!("Error: {e}")), true),
+                                Ok(output) => (output, false, false),
+                                Err(e) => (ToolOutput::text(format!("Error: {e}")), true, false),
                             }
                         }
                     };
@@ -319,14 +319,19 @@ impl Agent {
                 // Reuse the annotations already fetched for the policy decision.
                 let read_only = annotations.map(|a| a.read_only).unwrap_or(false);
 
-                self.emit(AuditEvent::ToolCall {
-                    iteration: iteration + 1,
-                    name: tool_call.name.clone(),
-                    arguments: tool_call.arguments.to_string(),
-                    result: text.clone(),
-                    is_error,
-                    read_only,
-                });
+                // A denied call was never executed and is already captured by the
+                // `ToolDenied` event; don't also emit a `ToolCall` (which would
+                // imply the tool ran and returned an error).
+                if !denied {
+                    self.emit(AuditEvent::ToolCall {
+                        iteration: iteration + 1,
+                        name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.to_string(),
+                        result: text.clone(),
+                        is_error,
+                        read_only,
+                    });
+                }
 
                 tool_calls.push(ToolCallSummary {
                     name: tool_call.name.clone(),
