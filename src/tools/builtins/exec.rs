@@ -293,7 +293,14 @@ async fn create_spill(label: &str) -> Option<(tokio::fs::File, PathBuf)> {
         "{SPILL_PREFIX}{label}-{}.log",
         uuid::Uuid::new_v4()
     ));
-    match tokio::fs::File::create(&path).await {
+    // Command output can contain sensitive data, and the temp dir is shared, so
+    // create the spill readable/writable by the owner only (0600) on Unix.
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    // `tokio::fs::OpenOptions::mode` is an inherent method on Unix (no import).
+    #[cfg(unix)]
+    opts.mode(0o600);
+    match opts.open(&path).await {
         Ok(file) => Some((file, path)),
         Err(e) => {
             tracing::warn!("could not create output spill file {}: {e}", path.display());
