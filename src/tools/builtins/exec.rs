@@ -244,6 +244,19 @@ async fn read_capped<R: AsyncRead + Unpin>(
             }
         }
     }
+    // If the output ended between `cap` and `2*cap` bytes we never crossed the
+    // in-loop spill threshold, yet the final trim below still drops the front.
+    // `buf` here holds the complete stream (nothing was trimmed while it stayed
+    // under 2*cap), so spill it before trimming rather than lose those bytes.
+    if buf.len() > cap && spill.is_none() && !spill_gave_up {
+        if let Some((mut file, path)) = create_spill(label).await {
+            if file.write_all(&buf).await.is_ok() {
+                spill = Some((file, path));
+            } else {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+    }
     // The loop leaves up to 2x cap buffered; trim the tail down to the cap.
     truncated |= trim_front_to_cap(&mut buf, cap);
     let spill = match spill {
@@ -550,6 +563,21 @@ mod tests {
         assert!(out.truncated);
         assert_eq!(out.bytes.len(), 100);
         let path = out.spill.expect("a spill file should have been written");
+        let spilled = std::fs::read(&path).expect("read spill file");
+        assert_eq!(spilled, data, "spill file must hold the complete output");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_read_capped_spills_when_output_between_cap_and_2x() {
+        // Output in (cap, 2*cap] never crosses the in-loop spill threshold, but
+        // the tail is still trimmed — so it must be spilled at the end, not lost.
+        let data: Vec<u8> = (0..150).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut pipe = Some(&data[..]);
+        let out = read_capped(&mut pipe, 100, "stdout").await;
+        assert!(out.truncated);
+        assert_eq!(out.bytes.len(), 100);
+        let path = out.spill.expect("output past the cap must be spilled");
         let spilled = std::fs::read(&path).expect("read spill file");
         assert_eq!(spilled, data, "spill file must hold the complete output");
         let _ = std::fs::remove_file(&path);
