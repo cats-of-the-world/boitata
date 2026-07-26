@@ -291,16 +291,17 @@ impl Agent {
                     {
                         Decision::Deny(reason) => {
                             warn!("Tool `{}` denied by policy: {reason}", tool_call.name);
+                            // Build the model-facing message first, then move
+                            // `reason` into the audit event (no clone needed).
+                            let output =
+                                ToolOutput::text(format!("Denied by tool policy: {reason}"));
                             self.emit(AuditEvent::ToolDenied {
                                 iteration: iteration + 1,
                                 name: tool_call.name.clone(),
                                 arguments: tool_call.arguments.to_string(),
-                                reason: reason.clone(),
+                                reason,
                             });
-                            (
-                                ToolOutput::text(format!("Denied by tool policy: {reason}")),
-                                true,
-                            )
+                            (output, true)
                         }
                         Decision::Allow => {
                             match self
