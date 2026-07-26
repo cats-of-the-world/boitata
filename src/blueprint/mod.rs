@@ -165,6 +165,16 @@ impl GraphBuilder {
     }
 }
 
+/// Aborts a spawned task when dropped, so the Ctrl-C watcher is always cleaned
+/// up even if the run returns early or panics.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Sort and de-duplicate collected duplicate names; return them joined for an
 /// error message, or `None` if there were none.
 fn dedup_names(names: &mut Vec<String>) -> Option<String> {
@@ -253,9 +263,10 @@ impl Executor {
                 }
             })
         };
-        let result = self.run_with_cancel(graph, task, cancel).await;
-        watcher.abort();
-        result
+        // Abort the watcher on every exit path, including a panic unwind, so it
+        // can't leak across runs.
+        let _guard = AbortOnDrop(watcher);
+        self.run_with_cancel(graph, task, cancel).await
     }
 
     /// Run `graph` under an external cancellation token.

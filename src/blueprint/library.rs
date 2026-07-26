@@ -50,4 +50,15 @@ mod tests {
         assert!(by_name("default").is_some());
         assert!(by_name("nope").is_none());
     }
+
+    #[test]
+    fn known_names_all_resolve() {
+        // Guards against `KNOWN` and `by_name` drifting out of sync.
+        for name in KNOWN {
+            assert!(
+                by_name(name).is_some(),
+                "KNOWN lists `{name}` but by_name returned None"
+            );
+        }
+    }
 }
