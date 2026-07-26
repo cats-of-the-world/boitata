@@ -114,6 +114,15 @@ impl Tool for GitCommitTool {
          tracked modified files first (equivalent to `git commit -a`). Does not push."
     }
 
+    fn annotations(&self) -> ToolAnnotations {
+        // A commit modifies the repo but is reversible (`git reset`), so it is
+        // not destructive.
+        ToolAnnotations {
+            destructive: false,
+            ..ToolAnnotations::default()
+        }
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

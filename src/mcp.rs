@@ -130,17 +130,17 @@ impl McpClient {
             let description = tool.description.map(|d| d.to_string()).unwrap_or_default();
             let input_schema = Value::Object((*tool.input_schema).clone());
             // Project the server's MCP annotations onto ours, applying the MCP
-            // spec defaults for any hint the server omitted.
-            let annotations = tool
-                .annotations
-                .as_ref()
-                .map(|a| ToolAnnotations {
-                    read_only: a.read_only_hint.unwrap_or(false),
-                    destructive: a.destructive_hint.unwrap_or(true),
-                    idempotent: a.idempotent_hint.unwrap_or(false),
-                    open_world: a.open_world_hint.unwrap_or(true),
-                })
-                .unwrap_or_default();
+            // spec default *per hint* whether or not an annotations object was
+            // sent. This makes an absent object and an empty one behave
+            // identically (both open-world, per the spec) rather than an absent
+            // object falling back to our closed-world `Default`.
+            let ann = tool.annotations.as_ref();
+            let annotations = ToolAnnotations {
+                read_only: ann.and_then(|a| a.read_only_hint).unwrap_or(false),
+                destructive: ann.and_then(|a| a.destructive_hint).unwrap_or(true),
+                idempotent: ann.and_then(|a| a.idempotent_hint).unwrap_or(false),
+                open_world: ann.and_then(|a| a.open_world_hint).unwrap_or(true),
+            };
 
             out.push(Arc::new(McpTool {
                 client: Arc::clone(self),
@@ -720,6 +720,11 @@ mod tests {
         let by_name: std::collections::HashMap<&str, &Arc<dyn Tool>> =
             tools.iter().map(|t| (t.name(), t)).collect();
         assert!(by_name.contains_key("test_echo"), "{:?}", by_name.keys());
+        // The test server sends no annotations object for `echo`, so the MCP spec
+        // defaults apply per hint: not read-only, and open-world (external).
+        let echo_ann = by_name["test_echo"].annotations();
+        assert!(!echo_ann.read_only);
+        assert!(echo_ann.open_world);
         assert!(
             by_name.contains_key("test_list_resources"),
             "{:?}",
