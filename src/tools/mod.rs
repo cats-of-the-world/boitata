@@ -1,7 +1,10 @@
 // Tools module: Tool registry and built-in tool implementations
 
 pub mod builtins;
+pub mod policy;
 pub mod workspace;
+
+pub use policy::{Decision, PolicyMode, ToolPolicy};
 
 use crate::provider::{ToolContent, ToolDefinition, tool_content_text};
 use async_trait::async_trait;

@@ -6,7 +6,7 @@ pub use context::Context;
 
 use crate::audit::{AuditEvent, AuditSink};
 use crate::provider::{CompletionRequest, Provider, ProviderError, ToolCall};
-use crate::tools::{ToolOutput, ToolRegistry};
+use crate::tools::{Decision, ToolOutput, ToolPolicy, ToolRegistry};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -67,6 +67,7 @@ pub struct Agent {
     max_iterations: usize,
     system_prompt: String,
     audit: Option<Arc<dyn AuditSink>>,
+    policy: ToolPolicy,
 }
 
 impl Agent {
@@ -78,7 +79,15 @@ impl Agent {
             max_iterations: 50,
             system_prompt: Self::default_system_prompt(),
             audit: None,
+            // Fully permissive by default, preserving prior behavior.
+            policy: ToolPolicy::allow_all(),
         }
+    }
+
+    /// Set the tool permission policy consulted before each tool call.
+    pub fn with_policy(mut self, policy: ToolPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Set a custom system prompt
@@ -271,30 +280,58 @@ impl Agent {
             for tool_call in &response.tool_calls {
                 debug!("Executing tool: {}", tool_call.name);
 
-                let result = self
-                    .execute_tool_call(tool_call.clone(), cancel.clone())
-                    .await;
-                let (output, is_error) = match result {
-                    Ok(output) => (output, false),
-                    Err(e) => (ToolOutput::text(format!("Error: {e}")), true),
-                };
+                // Consult the permission policy before running the tool. A denial
+                // is reported to the model as an error result (so it can adapt)
+                // and the tool never runs.
+                let annotations = self.tools.annotations(&tool_call.name);
+                let (output, is_error, denied) =
+                    match self
+                        .policy
+                        .decide(&tool_call.name, annotations, &tool_call.arguments)
+                    {
+                        Decision::Deny(reason) => {
+                            warn!("Tool `{}` denied by policy: {reason}", tool_call.name);
+                            // Build the model-facing message first, then move
+                            // `reason` into the audit event (no clone needed).
+                            let output =
+                                ToolOutput::text(format!("Denied by tool policy: {reason}"));
+                            self.emit(AuditEvent::ToolDenied {
+                                iteration: iteration + 1,
+                                name: tool_call.name.clone(),
+                                arguments: tool_call.arguments.to_string(),
+                                reason,
+                            });
+                            (output, true, true)
+                        }
+                        Decision::Allow => {
+                            match self
+                                .execute_tool_call(tool_call.clone(), cancel.clone())
+                                .await
+                            {
+                                Ok(output) => (output, false, false),
+                                Err(e) => (ToolOutput::text(format!("Error: {e}")), true, false),
+                            }
+                        }
+                    };
                 // Flatten to text for the text-only sinks (audit log + CLI
                 // summary); the structured content is carried into the context.
                 let text = output.to_text();
-                let read_only = self
-                    .tools
-                    .annotations(&tool_call.name)
-                    .map(|a| a.read_only)
-                    .unwrap_or(false);
+                // Reuse the annotations already fetched for the policy decision.
+                let read_only = annotations.map(|a| a.read_only).unwrap_or(false);
 
-                self.emit(AuditEvent::ToolCall {
-                    iteration: iteration + 1,
-                    name: tool_call.name.clone(),
-                    arguments: tool_call.arguments.to_string(),
-                    result: text.clone(),
-                    is_error,
-                    read_only,
-                });
+                // A denied call was never executed and is already captured by the
+                // `ToolDenied` event; don't also emit a `ToolCall` (which would
+                // imply the tool ran and returned an error).
+                if !denied {
+                    self.emit(AuditEvent::ToolCall {
+                        iteration: iteration + 1,
+                        name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.to_string(),
+                        result: text.clone(),
+                        is_error,
+                        read_only,
+                    });
+                }
 
                 tool_calls.push(ToolCallSummary {
                     name: tool_call.name.clone(),

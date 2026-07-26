@@ -65,6 +65,13 @@ pub enum AuditEvent {
         /// so a reader can distinguish observing from mutating calls.
         read_only: bool,
     },
+    /// A tool call was blocked by the permission policy before it ran.
+    ToolDenied {
+        iteration: usize,
+        name: String,
+        arguments: String,
+        reason: String,
+    },
     /// The run finished (successfully or not).
     RunCompleted {
         success: bool,

@@ -112,6 +112,25 @@ On Unix, a timed-out or cancelled command's whole process group is killed so
 nothing is orphaned. Non-zero exits (compiler/linter/test failures) come back as
 output — not errors — so the agent can read them and iterate.
 
+**Tool permission policy.** Before every tool call the agent consults a policy
+(mirroring the allow/deny decision goose's permission layer makes, but
+configured up front since Boitata runs unattended). Two composable controls:
+
+```toml
+# "allow_all" (default) or "read_only" (deny any tool that may modify state —
+# file_write/file_edit, git_commit, cargo_*, execute_command, ... — leaving only
+# the read-only tools like file_read, search, git_status).
+tool_policy = "read_only"
+
+# Regexes matched against execute_command command strings; a match is denied.
+denied_commands = ['rm\s+-rf\s+/', 'sudo\b', ':\(\)\s*\{']
+```
+
+A tool's read-only status comes from its annotations. Denied calls never run;
+the model receives the reason (so it can adapt) and the denial is recorded in the
+audit log as a `tool_denied` event. An invalid `denied_commands` regex is a
+config error and aborts the run rather than silently dropping the control.
+
 **Path confinement (secure by default).** The path-taking tools (`file_read`,
 `file_write`, `list_directory`, `search`) are confined to a workspace root —
 by default the directory Boitata runs in. Absolute paths, `..` traversal, and
