@@ -105,8 +105,11 @@ const MAX_READ_LINES: usize = 2000;
 /// cap [`MAX_READ_LINES`]). A trailing note flags any lines past the returned
 /// window so the model knows to page with `offset`.
 fn format_with_line_numbers(content: &str, offset: Option<usize>, limit: Option<usize>) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
+    use std::fmt::Write as _;
+
+    // Count lines without materializing a `Vec<&str>` the size of the whole file
+    // just to return a small window.
+    let total = content.lines().count();
     if total == 0 {
         return "(empty file)".to_string();
     }
@@ -119,17 +122,21 @@ fn format_with_line_numbers(content: &str, offset: Option<usize>, limit: Option<
     let start_idx = start - 1;
     let want = limit.unwrap_or(MAX_READ_LINES).min(MAX_READ_LINES);
     let end_idx = start_idx.saturating_add(want).min(total);
+    let shown = end_idx - start_idx;
 
-    let mut out = String::new();
-    for (i, line) in lines[start_idx..end_idx].iter().enumerate() {
-        out.push_str(&format!("{:>6}\t{}\n", start + i, line));
+    // Format directly into one buffer (write! avoids a temporary String per line);
+    // rough pre-size of number + tab + line + newline.
+    let mut out = String::with_capacity(shown * 40);
+    for (i, line) in content.lines().skip(start_idx).take(shown).enumerate() {
+        let _ = writeln!(out, "{:>6}\t{}", start + i, line);
     }
     if end_idx < total {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "... ({} more line(s); use offset={} to continue)",
             total - end_idx,
             end_idx + 1
-        ));
+        );
     }
     out.trim_end().to_string()
 }
