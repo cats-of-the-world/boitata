@@ -11,6 +11,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+/// Error string recorded when a run is stopped by cancellation (Ctrl-C).
+const CANCELLED_ERROR: &str = "Cancelled";
+
 /// A task to be executed by the agent
 #[derive(Debug, Clone)]
 pub struct Task {
@@ -104,6 +107,32 @@ impl Agent {
         }
     }
 
+    /// Record and build the result for a run cut short by cancellation. Shared by
+    /// the "cancelled while awaiting the model" and "cancelled mid-tool-batch"
+    /// paths so the two stay in lockstep.
+    fn cancelled_result(
+        &self,
+        iterations: usize,
+        tool_calls: Vec<ToolCallSummary>,
+        total_input_tokens: usize,
+        total_output_tokens: usize,
+    ) -> TaskResult {
+        self.emit(AuditEvent::RunCompleted {
+            success: false,
+            iterations,
+            error: Some(CANCELLED_ERROR.to_string()),
+            total_input_tokens,
+            total_output_tokens,
+        });
+        TaskResult {
+            success: false,
+            final_message: None,
+            iterations,
+            tool_calls,
+            error: Some(CANCELLED_ERROR.to_string()),
+        }
+    }
+
     /// Run a task. Interrupts (Ctrl-C) cancel the in-flight tool and stop the
     /// run; the running tool's subprocess/remote call is torn down promptly.
     pub async fn run(&self, task: Task) -> anyhow::Result<TaskResult> {
@@ -163,20 +192,12 @@ impl Agent {
                 biased;
                 _ = cancel.cancelled() => {
                     warn!("Run cancelled while awaiting the model");
-                    self.emit(AuditEvent::RunCompleted {
-                        success: false,
-                        iterations: iteration + 1,
-                        error: Some("Cancelled".to_string()),
+                    return Ok(self.cancelled_result(
+                        iteration + 1,
+                        tool_calls,
                         total_input_tokens,
                         total_output_tokens,
-                    });
-                    return Ok(TaskResult {
-                        success: false,
-                        final_message: None,
-                        iterations: iteration + 1,
-                        tool_calls,
-                        error: Some("Cancelled".to_string()),
-                    });
+                    ));
                 }
                 completion = self.provider.complete(request) => completion,
             };
@@ -295,20 +316,12 @@ impl Agent {
             // iteration's tools (the running tool already returned an error).
             if cancel.is_cancelled() {
                 warn!("Run cancelled after {} iteration(s)", iteration + 1);
-                self.emit(AuditEvent::RunCompleted {
-                    success: false,
-                    iterations: iteration + 1,
-                    error: Some("Cancelled".to_string()),
+                return Ok(self.cancelled_result(
+                    iteration + 1,
+                    tool_calls,
                     total_input_tokens,
                     total_output_tokens,
-                });
-                return Ok(TaskResult {
-                    success: false,
-                    final_message: None,
-                    iterations: iteration + 1,
-                    tool_calls,
-                    error: Some("Cancelled".to_string()),
-                });
+                ));
             }
         }
 
