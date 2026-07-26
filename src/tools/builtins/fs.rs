@@ -232,12 +232,16 @@ fn line_of_byte(content: &str, byte_idx: usize) -> usize {
 
 /// 1-based line numbers of every (non-overlapping) occurrence of `needle`.
 fn match_line_numbers(content: &str, needle: &str) -> Vec<usize> {
+    // An empty needle matches at every position and never advances `start`, so
+    // guard against it here as well as in the caller (avoids an infinite loop).
+    if needle.is_empty() {
+        return Vec::new();
+    }
     let mut lines = Vec::new();
     let mut start = 0;
     while let Some(pos) = content[start..].find(needle) {
         let abs = start + pos;
         lines.push(line_of_byte(content, abs));
-        // Advance past this match; `needle` is non-empty (guarded by the caller).
         start = abs + needle.len();
     }
     lines
@@ -376,6 +380,13 @@ impl Tool for FileEditTool {
             fs::write(&tmp, &new_content).map_err(|e| {
                 ToolError::ExecutionFailed(format!("failed to write temp file: {e}"))
             })?;
+            // The temp file is created with default permissions; carry over the
+            // original file's mode so an edit doesn't silently drop, say, the
+            // executable bit. Best-effort — a failure here shouldn't abort a
+            // successful edit.
+            if let Ok(meta) = fs::metadata(&confined) {
+                let _ = fs::set_permissions(&tmp, meta.permissions());
+            }
             if let Err(e) = fs::rename(&tmp, &confined) {
                 let _ = fs::remove_file(&tmp);
                 return Err(ToolError::ExecutionFailed(format!(
@@ -574,6 +585,35 @@ mod tests {
     fn test_compute_edit_empty_and_noop() {
         assert_eq!(compute_edit("a", "", "x"), Err(EditError::EmptyOld));
         assert_eq!(compute_edit("a", "a", "a"), Err(EditError::Noop));
+    }
+
+    #[test]
+    fn test_match_line_numbers_empty_needle_is_empty() {
+        // An empty needle must not loop forever; it returns no matches.
+        assert!(match_line_numbers("abc\ndef", "").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_file_edit_preserves_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("script.sh");
+        fs::write(&file_path, "echo OLD\n").unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        FileEditTool
+            .execute(
+                serde_json::json!({"path": file_path.to_str(), "old": "OLD", "new": "NEW"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        // The executable bit survives the atomic write-then-rename.
+        let mode = fs::metadata(&file_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "mode was {:o}", mode & 0o777);
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "echo NEW\n");
     }
 
     #[tokio::test]
