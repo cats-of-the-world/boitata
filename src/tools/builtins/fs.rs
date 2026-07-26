@@ -208,6 +208,209 @@ impl Tool for FileWriteTool {
     }
 }
 
+/// Tool for editing a file by replacing a unique occurrence of some text.
+pub struct FileEditTool;
+
+/// Why an edit could not be applied. Kept separate from the user-facing message
+/// so the decision logic is unit-testable.
+#[derive(Debug, PartialEq, Eq)]
+enum EditError {
+    /// `old` was empty (would match everywhere).
+    EmptyOld,
+    /// `old` and `new` are identical — nothing to do.
+    Noop,
+    /// `old` did not appear in the file.
+    NotFound,
+    /// `old` appeared more than once (the 1-based line of each occurrence).
+    Ambiguous(Vec<usize>),
+}
+
+/// 1-based line number of the byte at `byte_idx` in `content`.
+fn line_of_byte(content: &str, byte_idx: usize) -> usize {
+    content[..byte_idx].bytes().filter(|&b| b == b'\n').count() + 1
+}
+
+/// 1-based line numbers of every (non-overlapping) occurrence of `needle`.
+fn match_line_numbers(content: &str, needle: &str) -> Vec<usize> {
+    // An empty needle matches at every position and never advances `start`, so
+    // guard against it here as well as in the caller (avoids an infinite loop).
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while let Some(pos) = content[start..].find(needle) {
+        let abs = start + pos;
+        lines.push(line_of_byte(content, abs));
+        start = abs + needle.len();
+    }
+    lines
+}
+
+/// Compute the result of replacing the unique occurrence of `old` with `new`.
+/// Returns the new file content and the 1-based line where the edit begins, or
+/// an [`EditError`] explaining why it can't be applied uniquely.
+fn compute_edit(
+    content: &str,
+    old: &str,
+    new: &str,
+) -> std::result::Result<(String, usize), EditError> {
+    if old.is_empty() {
+        return Err(EditError::EmptyOld);
+    }
+    if old == new {
+        return Err(EditError::Noop);
+    }
+    let lines = match_line_numbers(content, old);
+    match lines.as_slice() {
+        [] => Err(EditError::NotFound),
+        [line] => Ok((content.replacen(old, new, 1), *line)),
+        _ => Err(EditError::Ambiguous(lines)),
+    }
+}
+
+#[async_trait]
+impl Tool for FileEditTool {
+    fn name(&self) -> &str {
+        "file_edit"
+    }
+
+    fn description(&self) -> &str {
+        "Edit a file by replacing an exact, unique occurrence of `old` with \
+         `new`. `old` must match the file byte-for-byte (including whitespace and \
+         indentation) and must appear exactly once — include enough surrounding \
+         context to make it unique. Prefer this over file_write for changing part \
+         of a file; use file_write only to create a file or replace it whole. \
+         Note that file_read prefixes lines with display-only numbers; do not \
+         include those in `old`."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The path to the file to edit"
+                },
+                "old": {
+                    "type": "string",
+                    "description": "Exact text to find (must be unique in the file)"
+                },
+                "new": {
+                    "type": "string",
+                    "description": "Replacement text"
+                }
+            },
+            "required": ["path", "old", "new"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _cancel: CancellationToken,
+    ) -> Result<ToolOutput> {
+        let str_arg = |key: &str| -> Result<String> {
+            arguments
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    name: "file_edit".to_string(),
+                    reason: format!("missing '{key}' argument"),
+                })
+        };
+        let path = str_arg("path")?;
+        let old = str_arg("old")?;
+        let new = str_arg("new")?;
+
+        blocking(move || {
+            let confined = workspace::confine(&path)?;
+            let content = fs::read_to_string(&confined)
+                .map_err(|e| ToolError::ExecutionFailed(format!("failed to read file: {e}")))?;
+
+            let (new_content, line) = compute_edit(&content, &old, &new).map_err(|e| match e {
+                EditError::EmptyOld => ToolError::InvalidArguments {
+                    name: "file_edit".to_string(),
+                    reason: "`old` must not be empty".to_string(),
+                },
+                EditError::Noop => ToolError::InvalidArguments {
+                    name: "file_edit".to_string(),
+                    reason: "`old` and `new` are identical; nothing to change".to_string(),
+                },
+                EditError::NotFound => {
+                    // A whitespace-only difference is the most common cause, so
+                    // point at it when the trimmed text does appear.
+                    let hint = if old.trim() != old && content.contains(old.trim()) {
+                        " (a match exists ignoring surrounding whitespace — check \
+                         indentation and trailing spaces)"
+                    } else {
+                        ""
+                    };
+                    ToolError::ExecutionFailed(format!(
+                        "no exact occurrence of `old` was found in {path}{hint}"
+                    ))
+                }
+                EditError::Ambiguous(lines) => {
+                    let shown: Vec<String> = lines.iter().take(5).map(|l| l.to_string()).collect();
+                    let more = if lines.len() > 5 { ", ..." } else { "" };
+                    ToolError::ExecutionFailed(format!(
+                        "`old` matches {} times in {path} (lines {}{}); add surrounding \
+                         context so it matches exactly once",
+                        lines.len(),
+                        shown.join(", "),
+                        more
+                    ))
+                }
+            })?;
+
+            // Write atomically: write a sibling temp file then rename over the
+            // original, so a failure mid-write (disk full, crash) never leaves
+            // the file truncated. The temp lives in the same directory so the
+            // rename stays on one filesystem.
+            let tmp = confined.with_file_name(format!(
+                ".{}.boitata-{}.tmp",
+                confined
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                uuid::Uuid::new_v4()
+            ));
+            fs::write(&tmp, &new_content).map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to write temp file: {e}"))
+            })?;
+            // The temp file is created with default permissions; carry over the
+            // original file's mode so an edit doesn't silently drop, say, the
+            // executable bit. Best-effort — a failure here shouldn't abort a
+            // successful edit.
+            if let Ok(meta) = fs::metadata(&confined) {
+                let _ = fs::set_permissions(&tmp, meta.permissions());
+            }
+            if let Err(e) = fs::rename(&tmp, &confined) {
+                let _ = fs::remove_file(&tmp);
+                return Err(ToolError::ExecutionFailed(format!(
+                    "failed to replace file: {e}"
+                )));
+            }
+
+            // Show the edited region (a few lines of context) so the caller can
+            // verify the change landed where intended.
+            let new_span = new.matches('\n').count() + 1;
+            let snippet = format_with_line_numbers(
+                &new_content,
+                Some(line.saturating_sub(2).max(1)),
+                Some(new_span + 4),
+            );
+            Ok(format!(
+                "Edited {path}: replaced 1 occurrence at line {line}.\n{snippet}"
+            ))
+        })
+        .await
+        .map(ToolOutput::from)
+    }
+}
+
 /// Tool for listing directory contents
 pub struct ListDirectoryTool;
 
@@ -356,6 +559,106 @@ mod tests {
             out.contains(&format!("use offset={}", MAX_READ_LINES + 1)),
             "{out}"
         );
+    }
+
+    #[test]
+    fn test_compute_edit_unique() {
+        let (out, line) = compute_edit("a\nBBB\nc", "BBB", "X").unwrap();
+        assert_eq!(out, "a\nX\nc");
+        assert_eq!(line, 2);
+    }
+
+    #[test]
+    fn test_compute_edit_not_found() {
+        assert_eq!(compute_edit("a\nb", "zzz", "x"), Err(EditError::NotFound));
+    }
+
+    #[test]
+    fn test_compute_edit_ambiguous_reports_lines() {
+        assert_eq!(
+            compute_edit("dup\nother\ndup", "dup", "x"),
+            Err(EditError::Ambiguous(vec![1, 3]))
+        );
+    }
+
+    #[test]
+    fn test_compute_edit_empty_and_noop() {
+        assert_eq!(compute_edit("a", "", "x"), Err(EditError::EmptyOld));
+        assert_eq!(compute_edit("a", "a", "a"), Err(EditError::Noop));
+    }
+
+    #[test]
+    fn test_match_line_numbers_empty_needle_is_empty() {
+        // An empty needle must not loop forever; it returns no matches.
+        assert!(match_line_numbers("abc\ndef", "").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_file_edit_preserves_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("script.sh");
+        fs::write(&file_path, "echo OLD\n").unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        FileEditTool
+            .execute(
+                serde_json::json!({"path": file_path.to_str(), "old": "OLD", "new": "NEW"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        // The executable bit survives the atomic write-then-rename.
+        let mode = fs::metadata(&file_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "mode was {:o}", mode & 0o777);
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "echo NEW\n");
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_applies_unique_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("edit.txt");
+        fs::write(&file_path, "line1\nTARGET\nline3\n").unwrap();
+
+        let result = FileEditTool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str(),
+                    "old": "TARGET",
+                    "new": "REPLACED"
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .to_text();
+
+        assert!(result.contains("line 2"), "{result}");
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "line1\nREPLACED\nline3\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_rejects_ambiguous_match() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("edit.txt");
+        fs::write(&file_path, "dup\ndup\n").unwrap();
+
+        let err = FileEditTool
+            .execute(
+                serde_json::json!({"path": file_path.to_str(), "old": "dup", "new": "x"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("matches 2 times"), "{err}");
+        // The file is left untouched when the edit can't be applied.
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "dup\ndup\n");
     }
 
     #[tokio::test]

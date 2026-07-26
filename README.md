@@ -80,8 +80,9 @@ The core execution engine that:
 Built-in tools organized by category:
 
 **File System (Deterministic)**
-- `file_read` - Read file contents
-- `file_write` - Write to files
+- `file_read` - Read file contents (line-numbered; paged with `offset`/`limit`)
+- `file_write` - Create or overwrite a file whole
+- `file_edit` - Replace a unique, exact occurrence of text in a file
 - `list_directory` - List directory contents
 
 **Code Operations (Deterministic)**

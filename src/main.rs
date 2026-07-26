@@ -25,8 +25,8 @@ use provider::{AnthropicProvider, OllamaProvider, OpenAIProvider, Provider};
 use tools::workspace;
 use tools::{
     CargoAddTool, CargoCheckTool, CargoClippyTool, CargoFmtTool, CargoTestTool, ExecuteCommandTool,
-    FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool, GitStatusTool,
-    ListDirectoryTool, SearchTool, ToolRegistry,
+    FileEditTool, FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool,
+    GitStatusTool, ListDirectoryTool, SearchTool, ToolRegistry,
 };
 
 /// Fallback output-token budget when the config doesn't set `max_tokens`.
@@ -169,6 +169,7 @@ async fn run_task(
     // File system
     tools.register(Arc::new(FileReadTool));
     tools.register(Arc::new(FileWriteTool));
+    tools.register(Arc::new(FileEditTool));
     tools.register(Arc::new(ListDirectoryTool));
     // Search
     tools.register(Arc::new(SearchTool));
