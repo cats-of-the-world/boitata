@@ -155,9 +155,32 @@ impl Agent {
             // Build the completion request
             let request = self.build_request(&context)?;
 
-            // Call the provider. On failure, record it before propagating so the
-            // audit log captures why an unattended run died (e.g. auth errors).
-            let response = match self.provider.complete(request).await {
+            // Call the provider, racing it against cancellation so Ctrl-C during
+            // the (often multi-second) LLM call stops the run promptly instead of
+            // waiting for the response. On failure, record it before propagating
+            // so the audit log captures why an unattended run died (e.g. auth).
+            let completion = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    warn!("Run cancelled while awaiting the model");
+                    self.emit(AuditEvent::RunCompleted {
+                        success: false,
+                        iterations: iteration + 1,
+                        error: Some("Cancelled".to_string()),
+                        total_input_tokens,
+                        total_output_tokens,
+                    });
+                    return Ok(TaskResult {
+                        success: false,
+                        final_message: None,
+                        iterations: iteration + 1,
+                        tool_calls,
+                        error: Some("Cancelled".to_string()),
+                    });
+                }
+                completion = self.provider.complete(request) => completion,
+            };
+            let response = match completion {
                 Ok(response) => response,
                 Err(e) => {
                     let message = match e {
@@ -260,6 +283,12 @@ impl Agent {
                 });
 
                 context.add_tool_result(&tool_call.id, output.content, is_error);
+
+                // Don't start the remaining tools in this batch if we were
+                // cancelled mid-batch; the post-loop check reports the outcome.
+                if cancel.is_cancelled() {
+                    break;
+                }
             }
 
             // Stop promptly if the run was cancelled while executing this

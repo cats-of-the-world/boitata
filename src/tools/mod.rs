@@ -32,6 +32,12 @@ pub enum ToolError {
     #[error("Tool execution failed: {0}")]
     ExecutionFailed(String),
 
+    /// The tool was interrupted by cancellation (Ctrl-C) rather than failing.
+    /// Distinguished from `ExecutionFailed` so callers/logs can tell a user
+    /// interrupt from a genuine error.
+    #[error("{0} cancelled")]
+    Cancelled(String),
+
     #[error("Other error: {0}")]
     Other(String),
 }

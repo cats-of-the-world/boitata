@@ -27,6 +27,19 @@ pub(super) struct Output {
     pub stderr: String,
 }
 
+/// How a subprocess run ended: normally, by timeout, or by external cancellation.
+/// The `Finished` payload is the joined `(stdout, stderr, wait-status)` triple.
+type JoinedOutput = (
+    (Vec<u8>, bool),
+    (Vec<u8>, bool),
+    std::io::Result<std::process::ExitStatus>,
+);
+enum RunOutcome {
+    Finished(JoinedOutput),
+    TimedOut,
+    Cancelled,
+}
+
 /// Run `program` with `args`, capturing output. Only returns `Err` when the
 /// process cannot be launched or exceeds `timeout`; a non-zero exit is a normal
 /// result so callers can decide how to interpret it.
@@ -122,26 +135,18 @@ pub(super) async fn run_raw(
             }
             let _ = child.start_kill();
             let _ = child.wait().await;
-            Err(ToolError::ExecutionFailed(if cancelled {
-                format!("`{program}` cancelled")
+            // A cancel is a user interrupt, not a failure — surface it as such so
+            // logs can tell the two apart.
+            Err(if cancelled {
+                ToolError::Cancelled(format!("`{program}`"))
             } else {
-                format!("`{program}` timed out after {}s", timeout.as_secs())
-            }))
+                ToolError::ExecutionFailed(format!(
+                    "`{program}` timed out after {}s",
+                    timeout.as_secs()
+                ))
+            })
         }
     }
-}
-
-/// How a subprocess run ended: normally, by timeout, or by external cancellation.
-/// The `Finished` payload is the joined `(stdout, stderr, wait-status)` triple.
-type JoinedOutput = (
-    (Vec<u8>, bool),
-    (Vec<u8>, bool),
-    std::io::Result<std::process::ExitStatus>,
-);
-enum RunOutcome {
-    Finished(JoinedOutput),
-    TimedOut,
-    Cancelled,
 }
 
 /// Drain a child pipe, keeping at most `cap` bytes from the *tail* so a chatty

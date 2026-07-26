@@ -358,8 +358,8 @@ impl Tool for McpTool {
         // dropped, aborting the in-flight request.
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => Err(ToolError::ExecutionFailed(format!(
-                "MCP tool `{}` cancelled",
+            _ = cancel.cancelled() => Err(ToolError::Cancelled(format!(
+                "MCP tool `{}`",
                 self.remote_name
             ))),
             result = self.client.call(&self.remote_name, arguments) => result
@@ -403,9 +403,7 @@ impl Tool for McpListResourcesTool {
     ) -> crate::tools::Result<ToolOutput> {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => Err(ToolError::ExecutionFailed(
-                "list_resources cancelled".to_string(),
-            )),
+            _ = cancel.cancelled() => Err(ToolError::Cancelled("list_resources".to_string())),
             result = self.client.list_resources() => result
                 .map(ToolOutput::from)
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string())),
@@ -459,9 +457,7 @@ impl Tool for McpReadResourceTool {
             })?;
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => Err(ToolError::ExecutionFailed(
-                "read_resource cancelled".to_string(),
-            )),
+            _ = cancel.cancelled() => Err(ToolError::Cancelled("read_resource".to_string())),
             result = self.client.read_resource(uri) => result
                 .map(ToolOutput::from)
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string())),
@@ -771,6 +767,16 @@ mod tests {
             .expect("call echo")
             .to_text();
         assert_eq!(echo, "echo: hi");
+
+        // A pre-cancelled token short-circuits the call (the `biased` select
+        // picks the ready `cancelled()` branch first) and returns `Cancelled`.
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let err = by_name["test_echo"]
+            .execute(serde_json::json!({"text": "hi"}), cancelled)
+            .await
+            .expect_err("cancelled call should error");
+        assert!(matches!(err, ToolError::Cancelled(_)), "{err:?}");
 
         // Listing resources returns the server's resource summary.
         let listed = by_name["test_list_resources"]
