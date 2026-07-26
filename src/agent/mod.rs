@@ -1,11 +1,14 @@
 // Agent module: Core agent loop and orchestration
 
-mod context;
-
-pub use context::Context;
-
 use crate::audit::{AuditEvent, AuditSink};
-use crate::provider::{CompletionRequest, Provider, ProviderError, ToolCall};
+use crate::context::{
+    Context, KEEP_RECENT_MESSAGES, SUMMARIZATION_SYSTEM_PROMPT, TokenCounter, apply_summary,
+    needs_compaction, pick_cutoff, render_for_summary,
+};
+use crate::provider::{
+    CompletionRequest, Message, MessageContent, MessageRole, Provider, ProviderError, ToolCall,
+    ToolDefinition,
+};
 use crate::tools::{Decision, ToolOutput, ToolPolicy, ToolRegistry};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -13,6 +16,10 @@ use tracing::{debug, info, warn};
 
 /// Error string recorded when a run is stopped by cancellation (Ctrl-C).
 const CANCELLED_ERROR: &str = "Cancelled";
+
+/// Default fraction of the model's context window at which older turns are
+/// summarized. Matches goose's default auto-compaction threshold.
+const DEFAULT_COMPACT_THRESHOLD: f32 = 0.8;
 
 /// A task to be executed by the agent
 #[derive(Debug, Clone)]
@@ -68,6 +75,9 @@ pub struct Agent {
     system_prompt: String,
     audit: Option<Arc<dyn AuditSink>>,
     policy: ToolPolicy,
+    /// Fraction of the model's context window at which older turns are summarized.
+    /// `0.0` disables compaction.
+    compact_threshold: f32,
 }
 
 impl Agent {
@@ -81,12 +91,20 @@ impl Agent {
             audit: None,
             // Fully permissive by default, preserving prior behavior.
             policy: ToolPolicy::allow_all(),
+            compact_threshold: DEFAULT_COMPACT_THRESHOLD,
         }
     }
 
     /// Set the tool permission policy consulted before each tool call.
     pub fn with_policy(mut self, policy: ToolPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Set the fraction of the model's context window at which older turns are
+    /// summarized into a synopsis. `0.0` disables compaction.
+    pub fn with_compact_threshold(mut self, threshold: f32) -> Self {
+        self.compact_threshold = threshold;
         self
     }
 
@@ -178,6 +196,19 @@ impl Agent {
         let mut total_input_tokens = 0usize;
         let mut total_output_tokens = 0usize;
 
+        // Tokenizer and tool definitions are fixed for the run; build them once and
+        // reuse them when deciding whether to compact each iteration.
+        let counter = TokenCounter::new();
+        let tool_defs = if self.provider.supports_tools() {
+            self.tools.to_definitions()
+        } else {
+            Vec::new()
+        };
+
+        // Record the system prompt on the context so token accounting reflects it
+        // (it is a fixed, non-trivial share of every request).
+        context.set_system_prompt(self.system_prompt.clone());
+
         // Add the task as the initial user message
         context.add_user_message(&task.description);
 
@@ -189,6 +220,12 @@ impl Agent {
 
         for iteration in 0..max_iterations {
             debug!("Iteration {}", iteration + 1);
+
+            // Summarize older turns if we're approaching the context window, so a
+            // long run compacts instead of overflowing. Best-effort: on failure we
+            // proceed and let the provider's own limit be the backstop.
+            self.maybe_compact(&mut context, &counter, &tool_defs, iteration, &cancel)
+                .await;
 
             // Build the completion request
             let request = self.build_request(&context)?;
@@ -402,6 +439,78 @@ impl Agent {
         })
     }
 
+    /// Summarize the oldest turns when the context nears the model's window.
+    /// Best-effort: any failure — no suitable cutoff, cancellation, a summarizer
+    /// error, or an empty summary — leaves the context untouched, and the
+    /// provider's own limit remains the backstop.
+    async fn maybe_compact(
+        &self,
+        context: &mut Context,
+        counter: &TokenCounter,
+        tool_defs: &[ToolDefinition],
+        iteration: usize,
+        cancel: &CancellationToken,
+    ) {
+        if self.compact_threshold <= 0.0 {
+            return;
+        }
+        let used = context.token_count(counter, tool_defs);
+        if !needs_compaction(used, self.provider.context_limit(), self.compact_threshold) {
+            return;
+        }
+        let Some(cutoff) = pick_cutoff(context, KEEP_RECENT_MESSAGES) else {
+            return;
+        };
+
+        let messages_before = context.len();
+        let to_summarize = render_for_summary(context, cutoff);
+
+        // Ask the model to summarize the older turns. A lower temperature keeps
+        // the synopsis faithful. Race against cancellation like the main call.
+        let request = CompletionRequest {
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: MessageContent::Text(to_summarize),
+            }],
+            tools: None,
+            max_tokens: Some(self.provider.max_tokens()),
+            temperature: Some(0.3),
+            system: Some(SUMMARIZATION_SYSTEM_PROMPT.to_string()),
+        };
+
+        let completion = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            completion = self.provider.complete(request) => completion,
+        };
+
+        let summary = match completion {
+            Ok(response) => response.content.unwrap_or_default(),
+            Err(e) => {
+                warn!("Context compaction summarization failed: {e}");
+                return;
+            }
+        };
+        if summary.trim().is_empty() {
+            warn!("Context compaction produced an empty summary; skipping");
+            return;
+        }
+
+        apply_summary(context, cutoff, summary);
+        let tokens_after = context.token_count(counter, tool_defs);
+        info!(
+            "Compacted context: {messages_before} -> {} messages (~{used} -> ~{tokens_after} tokens)",
+            context.len()
+        );
+        self.emit(AuditEvent::ContextCompacted {
+            iteration: iteration + 1,
+            tokens_before: used,
+            tokens_after,
+            messages_before,
+            messages_after: context.len(),
+        });
+    }
+
     async fn execute_tool_call(
         &self,
         tool_call: ToolCall,
@@ -461,5 +570,127 @@ mod tests {
         assert_eq!(task.description, "Fix the bug");
         assert_eq!(task.workspace, Some("/tmp/test".to_string()));
         assert_eq!(task.max_iterations, Some(100));
+    }
+
+    // A provider that first drives several tool-calling turns (to grow the
+    // history) and then finishes, returning a canned synopsis whenever the agent
+    // asks it to summarize. Its context window is tiny so the compaction
+    // threshold is crossed as soon as there are enough turns to summarize.
+    struct CompactingProvider {
+        main_calls: std::sync::atomic::AtomicUsize,
+        summary_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CompactingProvider {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn model(&self) -> &str {
+            "fake-model"
+        }
+        fn context_limit(&self) -> usize {
+            50
+        }
+        fn max_tokens(&self) -> usize {
+            128
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> crate::provider::ProviderResult<crate::provider::CompletionResponse> {
+            use std::sync::atomic::Ordering;
+
+            // The summarization call is the one carrying the summarization system
+            // prompt and no tools.
+            if request.system.as_deref() == Some(SUMMARIZATION_SYSTEM_PROMPT) {
+                self.summary_calls.fetch_add(1, Ordering::SeqCst);
+                return Ok(crate::provider::CompletionResponse {
+                    content: Some("compact synopsis".to_string()),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    finish_reason: Some("stop".to_string()),
+                });
+            }
+
+            let n = self.main_calls.fetch_add(1, Ordering::SeqCst);
+            if n < 5 {
+                // Grow the history with tool calls. The tool is unregistered, so
+                // it yields error results — which still enlarge the context.
+                Ok(crate::provider::CompletionResponse {
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: format!("call-{n}"),
+                        name: "noop".to_string(),
+                        arguments: serde_json::json!({ "i": n }),
+                    }],
+                    usage: None,
+                    finish_reason: Some("tool_use".to_string()),
+                })
+            } else {
+                Ok(crate::provider::CompletionResponse {
+                    content: Some("all done".to_string()),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    finish_reason: Some("stop".to_string()),
+                })
+            }
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> crate::provider::ProviderResult<
+            tokio_stream::wrappers::ReceiverStream<
+                crate::provider::ProviderResult<crate::provider::Chunk>,
+            >,
+        > {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_fires_and_run_completes() {
+        use std::sync::atomic::Ordering;
+
+        let provider = Arc::new(CompactingProvider {
+            main_calls: std::sync::atomic::AtomicUsize::new(0),
+            summary_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let agent = Agent::new(provider.clone(), ToolRegistry::new());
+        let result = agent
+            .run(Task::new("do a big task".to_string()))
+            .await
+            .expect("run should not error");
+
+        assert!(result.success, "run should complete: {result:?}");
+        assert!(
+            provider.summary_calls.load(Ordering::SeqCst) >= 1,
+            "compaction should have summarized the older turns at least once"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_threshold_never_compacts() {
+        use std::sync::atomic::Ordering;
+
+        let provider = Arc::new(CompactingProvider {
+            main_calls: std::sync::atomic::AtomicUsize::new(0),
+            summary_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let agent = Agent::new(provider.clone(), ToolRegistry::new()).with_compact_threshold(0.0);
+        let result = agent
+            .run(Task::new("do a big task".to_string()))
+            .await
+            .expect("run should not error");
+
+        assert!(result.success);
+        assert_eq!(
+            provider.summary_calls.load(Ordering::SeqCst),
+            0,
+            "compaction must not run when the threshold is 0"
+        );
     }
 }

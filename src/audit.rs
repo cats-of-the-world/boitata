@@ -72,6 +72,17 @@ pub enum AuditEvent {
         arguments: String,
         reason: String,
     },
+    /// Older turns were summarized into a synopsis to stay within the context
+    /// window.
+    ContextCompacted {
+        iteration: usize,
+        /// Estimated prompt tokens before and after compaction.
+        tokens_before: usize,
+        tokens_after: usize,
+        /// Message count before and after compaction.
+        messages_before: usize,
+        messages_after: usize,
+    },
     /// The run finished (successfully or not).
     RunCompleted {
         success: bool,

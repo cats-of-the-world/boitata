@@ -247,6 +247,13 @@ pub trait Provider: Send + Sync {
         8192
     }
 
+    /// The size of the model's context window, in tokens. Used to decide when to
+    /// compact the conversation. The default is a conservative 128k; providers
+    /// override it per model.
+    fn context_limit(&self) -> usize {
+        128_000
+    }
+
     /// Complete a request (non-streaming)
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse>;
 

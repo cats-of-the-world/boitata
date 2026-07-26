@@ -213,6 +213,9 @@ async fn run_task(
     if let Some(max_iterations) = config.max_iterations {
         agent = agent.with_max_iterations(max_iterations);
     }
+    if let Some(threshold) = config.auto_compact_threshold {
+        agent = agent.with_compact_threshold(threshold);
+    }
 
     // Build the tool permission policy from config. A bad denylist regex is a
     // config error we fail on rather than silently dropping a security control.
