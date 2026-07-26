@@ -1,11 +1,12 @@
 // Shared subprocess execution for the command-oriented built-in tools
 // (execute_command, search, git_*, cargo_*).
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -27,11 +28,20 @@ pub(super) struct Output {
     pub stderr: String,
 }
 
+/// Captured output of one stream: the kept tail, whether earlier bytes were
+/// dropped, and — when they were — the path of a temp file holding the *full*,
+/// untruncated stream for later inspection.
+pub(super) struct CappedStream {
+    bytes: Vec<u8>,
+    truncated: bool,
+    spill: Option<PathBuf>,
+}
+
 /// How a subprocess run ended: normally, by timeout, or by external cancellation.
 /// The `Finished` payload is the joined `(stdout, stderr, wait-status)` triple.
 type JoinedOutput = (
-    (Vec<u8>, bool),
-    (Vec<u8>, bool),
+    CappedStream,
+    CappedStream,
     std::io::Result<std::process::ExitStatus>,
 );
 enum RunOutcome {
@@ -96,8 +106,8 @@ pub(super) async fn run_raw(
     // forked grandchildren don't orphan.
     let outcome = tokio::select! {
         joined = tokio::time::timeout(timeout, async {
-            let stdout = read_capped(&mut stdout_pipe, MAX_STREAM_BYTES);
-            let stderr = read_capped(&mut stderr_pipe, MAX_STREAM_BYTES);
+            let stdout = read_capped(&mut stdout_pipe, MAX_STREAM_BYTES, "stdout");
+            let stderr = read_capped(&mut stderr_pipe, MAX_STREAM_BYTES, "stderr");
             let status = child.wait();
             tokio::join!(stdout, stderr, status)
         }) => match joined {
@@ -151,14 +161,29 @@ pub(super) async fn run_raw(
 }
 
 /// Drain a child pipe, keeping at most `cap` bytes from the *tail* so a chatty
-/// command can't exhaust memory. Continues reading past the cap (discarding) so
-/// the child never blocks on a full pipe. Returns the kept bytes and whether any
-/// were dropped.
-async fn read_capped<R: AsyncRead + Unpin>(pipe: &mut Option<R>, cap: usize) -> (Vec<u8>, bool) {
+/// command can't exhaust memory. Continues reading past the cap (so the child
+/// never blocks on a full pipe), but instead of discarding the overflow it
+/// streams the *whole* output to a temp file named with `label` once the cap is
+/// exceeded. The kept tail is for inline display (build/test errors cluster at
+/// the end); the spill file preserves the middle the tail can't.
+async fn read_capped<R: AsyncRead + Unpin>(
+    pipe: &mut Option<R>,
+    cap: usize,
+    label: &str,
+) -> CappedStream {
     let mut buf: Vec<u8> = Vec::new();
     let mut truncated = false;
+    let mut spill: Option<(tokio::fs::File, PathBuf)> = None;
+    // Once a spill write fails we stop trying: retrying after the buffer has been
+    // trimmed would produce an incomplete file we'd wrongly report as the full
+    // output. The stream then keeps only its in-memory tail.
+    let mut spill_gave_up = false;
     let Some(reader) = pipe.as_mut() else {
-        return (buf, truncated);
+        return CappedStream {
+            bytes: buf,
+            truncated,
+            spill: None,
+        };
     };
     let mut chunk = [0u8; 8192];
     loop {
@@ -168,20 +193,161 @@ async fn read_capped<R: AsyncRead + Unpin>(pipe: &mut Option<R>, cap: usize) -> 
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
+                let data = &chunk[..n];
+                // Already spilling: persist this chunk before it can be trimmed.
+                // If the write fails (e.g. disk full), discard the partial spill
+                // and give up — a partial spill is worse than none.
+                let write_failed = match spill.as_mut() {
+                    Some((file, _)) => file.write_all(data).await.is_err(),
+                    None => false,
+                };
+                if write_failed {
+                    spill_gave_up = true;
+                    if let Some((_, path)) = spill.take() {
+                        tracing::warn!(
+                            "output spill write failed; discarding partial spill file {} (tail only)",
+                            path.display()
+                        );
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
+                }
+                buf.extend_from_slice(data);
                 // Only trim once the buffer reaches 2x the cap, so the O(cap)
                 // memmove is amortized over many chunks instead of running on
-                // every read (a 1 MB stream would otherwise memmove ~cap bytes
-                // ~125 times). A final trim below enforces the exact bound.
+                // every read. A final trim below enforces the exact bound.
                 if buf.len() > cap * 2 {
+                    // First overflow: start spilling by writing everything read
+                    // so far. Nothing has been spilled yet, so `buf` holds the
+                    // complete stream up to this point; subsequent chunks are
+                    // written above before they can be trimmed.
+                    if spill.is_none() && !spill_gave_up {
+                        match create_spill(label).await {
+                            Some((mut file, path)) => {
+                                if file.write_all(&buf).await.is_ok() {
+                                    spill = Some((file, path));
+                                } else {
+                                    // The initial write failed; give up rather
+                                    // than retry from an already-trimmed buffer.
+                                    spill_gave_up = true;
+                                    tracing::warn!(
+                                        "output spill write failed; discarding spill file {} (tail only)",
+                                        path.display()
+                                    );
+                                    let _ = tokio::fs::remove_file(&path).await;
+                                }
+                            }
+                            None => spill_gave_up = true,
+                        }
+                    }
                     truncated |= trim_front_to_cap(&mut buf, cap);
                 }
             }
         }
     }
+    // If the output ended between `cap` and `2*cap` bytes we never crossed the
+    // in-loop spill threshold, yet the final trim below still drops the front.
+    // `buf` here holds the complete stream (nothing was trimmed while it stayed
+    // under 2*cap), so spill it before trimming rather than lose those bytes.
+    if buf.len() > cap && spill.is_none() && !spill_gave_up {
+        if let Some((mut file, path)) = create_spill(label).await {
+            if file.write_all(&buf).await.is_ok() {
+                spill = Some((file, path));
+            } else {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+    }
     // The loop leaves up to 2x cap buffered; trim the tail down to the cap.
     truncated |= trim_front_to_cap(&mut buf, cap);
-    (buf, truncated)
+    let spill = match spill {
+        Some((mut file, path)) => {
+            // A failed flush may mean a truncated file; drop it rather than
+            // report an incomplete spill as the full output.
+            if file.flush().await.is_err() {
+                tracing::warn!(
+                    "output spill flush failed; discarding spill file {}",
+                    path.display()
+                );
+                let _ = tokio::fs::remove_file(&path).await;
+                None
+            } else {
+                Some(path)
+            }
+        }
+        None => None,
+    };
+    CappedStream {
+        bytes: buf,
+        truncated,
+        spill,
+    }
+}
+
+/// Distinctive prefix for command-output spill files, so the stale-file sweep
+/// only ever touches our own spills (not, say, a `boitata-audit.log`).
+const SPILL_PREFIX: &str = "boitata-cmdout-";
+/// Spill files left by earlier runs are pruned once they exceed this age.
+const SPILL_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Create a temp file to hold a stream's full output. Best-effort: on failure we
+/// log and return `None`, keeping only the in-memory tail. The file is left in
+/// place (not auto-deleted) so it can be inspected after the run; stale ones are
+/// swept by [`cleanup_stale_spills`].
+async fn create_spill(label: &str) -> Option<(tokio::fs::File, PathBuf)> {
+    // Prune stale spills from earlier runs on first use so they don't accumulate
+    // unbounded. Runs at most once per process, on the blocking pool so its
+    // synchronous filesystem I/O doesn't stall the async worker.
+    static CLEANUP: std::sync::Once = std::sync::Once::new();
+    CLEANUP.call_once(|| {
+        tokio::task::spawn_blocking(cleanup_stale_spills);
+    });
+
+    let path = std::env::temp_dir().join(format!(
+        "{SPILL_PREFIX}{label}-{}.log",
+        uuid::Uuid::new_v4()
+    ));
+    // Command output can contain sensitive data, and the temp dir is shared, so
+    // create the spill readable/writable by the owner only (0600) on Unix.
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    // `tokio::fs::OpenOptions::mode` is an inherent method on Unix (no import).
+    #[cfg(unix)]
+    opts.mode(0o600);
+    match opts.open(&path).await {
+        Ok(file) => Some((file, path)),
+        Err(e) => {
+            tracing::warn!("could not create output spill file {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// Best-effort removal of spill files from earlier runs older than
+/// [`SPILL_MAX_AGE`]. Ignores every error (missing dir, permission, races) — a
+/// failed sweep must never affect the current command.
+fn cleanup_stale_spills() {
+    let now = std::time::SystemTime::now();
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(SPILL_PREFIX)
+        {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > SPILL_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Drop the front of `buf` so at most `cap` bytes (the tail, where build/test
@@ -200,14 +366,27 @@ fn trim_front_to_cap(buf: &mut Vec<u8>, cap: usize) -> bool {
     true
 }
 
-/// Turn captured bytes into a string, noting up front if earlier output was
-/// dropped (we keep the tail).
-fn finalize_stream((bytes, truncated): (Vec<u8>, bool)) -> String {
+/// Turn a captured stream into a string. When the output was truncated, note it
+/// up front (we keep the tail) and point at the spill file holding the full
+/// output when one was written.
+fn finalize_stream(stream: CappedStream) -> String {
+    let CappedStream {
+        bytes,
+        truncated,
+        spill,
+    } = stream;
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    if truncated {
-        format!("... (earlier output truncated to at most {MAX_STREAM_BYTES} bytes)\n{text}")
-    } else {
-        text
+    if !truncated {
+        return text;
+    }
+    match spill {
+        Some(path) => format!(
+            "... (output truncated to the last {MAX_STREAM_BYTES} bytes; full output saved to {})\n{text}",
+            path.display()
+        ),
+        None => {
+            format!("... (earlier output truncated to at most {MAX_STREAM_BYTES} bytes)\n{text}")
+        }
     }
 }
 
@@ -354,23 +533,54 @@ mod tests {
     #[tokio::test]
     async fn test_read_capped_no_truncation_no_duplication() {
         // Under the cap: bytes are kept verbatim, exactly once (regression for a
-        // bug that appended each chunk twice).
+        // bug that appended each chunk twice), and nothing is spilled.
         let data: Vec<u8> = (0..50u8).collect();
         let mut pipe = Some(&data[..]);
-        let (kept, truncated) = read_capped(&mut pipe, 1000).await;
-        assert!(!truncated);
-        assert_eq!(kept, data);
+        let out = read_capped(&mut pipe, 1000, "stdout").await;
+        assert!(!out.truncated);
+        assert!(out.spill.is_none());
+        assert_eq!(out.bytes, data);
     }
 
     #[tokio::test]
     async fn test_read_capped_keeps_tail() {
-        // Over the cap: only the last `cap` bytes (the tail) survive. ASCII data
-        // so the UTF-8 boundary walk doesn't shift the cut.
+        // Over the cap: only the last `cap` bytes (the tail) survive in memory.
+        // ASCII data so the UTF-8 boundary walk doesn't shift the cut.
         let data: Vec<u8> = (0..200).map(|i| b'a' + (i % 26) as u8).collect();
         let mut pipe = Some(&data[..]);
-        let (kept, truncated) = read_capped(&mut pipe, 40).await;
-        assert!(truncated);
-        assert_eq!(kept, data[160..]);
+        let out = read_capped(&mut pipe, 40, "stdout").await;
+        assert!(out.truncated);
+        assert_eq!(out.bytes, data[160..]);
+    }
+
+    #[tokio::test]
+    async fn test_read_capped_spills_full_output() {
+        // Over the cap: the full stream is written to a spill file, even though
+        // only the tail is kept in memory.
+        let data: Vec<u8> = (0..5000).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut pipe = Some(&data[..]);
+        let out = read_capped(&mut pipe, 100, "stdout").await;
+        assert!(out.truncated);
+        assert_eq!(out.bytes.len(), 100);
+        let path = out.spill.expect("a spill file should have been written");
+        let spilled = std::fs::read(&path).expect("read spill file");
+        assert_eq!(spilled, data, "spill file must hold the complete output");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_read_capped_spills_when_output_between_cap_and_2x() {
+        // Output in (cap, 2*cap] never crosses the in-loop spill threshold, but
+        // the tail is still trimmed — so it must be spilled at the end, not lost.
+        let data: Vec<u8> = (0..150).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut pipe = Some(&data[..]);
+        let out = read_capped(&mut pipe, 100, "stdout").await;
+        assert!(out.truncated);
+        assert_eq!(out.bytes.len(), 100);
+        let path = out.spill.expect("output past the cap must be spilled");
+        let spilled = std::fs::read(&path).expect("read spill file");
+        assert_eq!(spilled, data, "spill file must hold the complete output");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
@@ -380,9 +590,9 @@ mod tests {
         // (0xC3 0xA9); cutting between them would split it.
         let data = "a\u{e9}".repeat(50).into_bytes(); // 150 bytes, accent = 2 bytes each
         let mut pipe = Some(&data[..]);
-        let (kept, _truncated) = read_capped(&mut pipe, 40).await;
+        let out = read_capped(&mut pipe, 40, "stdout").await;
         assert!(
-            std::str::from_utf8(&kept).is_ok(),
+            std::str::from_utf8(&out.bytes).is_ok(),
             "tail split a multi-byte char"
         );
     }

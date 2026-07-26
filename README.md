@@ -105,11 +105,12 @@ Built-in tools organized by category:
 - `execute_command` - Run shell commands; runs with the agent's privileges.
   Enabled by default — disable with `allow_execute_command = false`
 
-Every command-based tool runs with a timeout, captured output (truncated to keep
-the context lean), and no interactive stdin. On Unix, a timed-out command's whole
-process group is killed so nothing is orphaned. Non-zero exits (compiler/linter/
-test failures) come back as output — not errors — so the agent can read them and
-iterate.
+Every command-based tool runs with a timeout, captured output (the tail is kept
+to keep the context lean; when output is truncated the **full** output is written
+to a temp file and its path is included in the result), and no interactive stdin.
+On Unix, a timed-out or cancelled command's whole process group is killed so
+nothing is orphaned. Non-zero exits (compiler/linter/test failures) come back as
+output — not errors — so the agent can read them and iterate.
 
 **Path confinement (secure by default).** The path-taking tools (`file_read`,
 `file_write`, `list_directory`, `search`) are confined to a workspace root —
