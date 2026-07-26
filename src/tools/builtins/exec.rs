@@ -191,8 +191,21 @@ async fn read_capped<R: AsyncRead + Unpin>(
             Ok(n) => {
                 let data = &chunk[..n];
                 // Already spilling: persist this chunk before it can be trimmed.
+                // If the write fails (e.g. disk full), a partial spill is worse
+                // than none — discard it so `finalize_stream` won't claim the
+                // full output was saved.
+                let mut write_failed = false;
                 if let Some((file, _)) = spill.as_mut() {
-                    let _ = file.write_all(data).await;
+                    write_failed = file.write_all(data).await.is_err();
+                }
+                if write_failed {
+                    if let Some((_, path)) = spill.take() {
+                        tracing::warn!(
+                            "output spill write failed; discarding partial spill file {}",
+                            path.display()
+                        );
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
                 }
                 buf.extend_from_slice(data);
                 // Only trim once the buffer reaches 2x the cap, so the O(cap)
@@ -219,8 +232,18 @@ async fn read_capped<R: AsyncRead + Unpin>(
     truncated |= trim_front_to_cap(&mut buf, cap);
     let spill = match spill {
         Some((mut file, path)) => {
-            let _ = file.flush().await;
-            Some(path)
+            // A failed flush may mean a truncated file; drop it rather than
+            // report an incomplete spill as the full output.
+            if file.flush().await.is_err() {
+                tracing::warn!(
+                    "output spill flush failed; discarding spill file {}",
+                    path.display()
+                );
+                let _ = tokio::fs::remove_file(&path).await;
+                None
+            } else {
+                Some(path)
+            }
         }
         None => None,
     };
@@ -231,16 +254,59 @@ async fn read_capped<R: AsyncRead + Unpin>(
     }
 }
 
+/// Distinctive prefix for command-output spill files, so the stale-file sweep
+/// only ever touches our own spills (not, say, a `boitata-audit.log`).
+const SPILL_PREFIX: &str = "boitata-cmdout-";
+/// Spill files left by earlier runs are pruned once they exceed this age.
+const SPILL_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Create a temp file to hold a stream's full output. Best-effort: on failure we
 /// log and return `None`, keeping only the in-memory tail. The file is left in
-/// place (not auto-deleted) so it can be inspected after the run.
+/// place (not auto-deleted) so it can be inspected after the run; stale ones are
+/// swept by [`cleanup_stale_spills`].
 async fn create_spill(label: &str) -> Option<(tokio::fs::File, PathBuf)> {
-    let path = std::env::temp_dir().join(format!("boitata-{label}-{}.log", uuid::Uuid::new_v4()));
+    // Prune stale spills from earlier runs on first use so they don't accumulate
+    // unbounded. Runs at most once per process.
+    static CLEANUP: std::sync::Once = std::sync::Once::new();
+    CLEANUP.call_once(cleanup_stale_spills);
+
+    let path = std::env::temp_dir().join(format!(
+        "{SPILL_PREFIX}{label}-{}.log",
+        uuid::Uuid::new_v4()
+    ));
     match tokio::fs::File::create(&path).await {
         Ok(file) => Some((file, path)),
         Err(e) => {
             tracing::warn!("could not create output spill file {}: {e}", path.display());
             None
+        }
+    }
+}
+
+/// Best-effort removal of spill files from earlier runs older than
+/// [`SPILL_MAX_AGE`]. Ignores every error (missing dir, permission, races) — a
+/// failed sweep must never affect the current command.
+fn cleanup_stale_spills() {
+    let now = std::time::SystemTime::now();
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(SPILL_PREFIX)
+        {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > SPILL_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
