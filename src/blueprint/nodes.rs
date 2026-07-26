@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use super::state::{State, Status, Update, render};
+use super::state::{State, Status, Update, render, render_shell};
 use crate::agent::{Agent, Task};
 use crate::audit::{AuditSink, NodeKind};
 use crate::provider::Provider;
@@ -94,7 +94,7 @@ impl Node for AgentNode {
         let text = result
             .final_message
             .or(result.error)
-            .unwrap_or_else(|| "(no output)".to_string());
+            .unwrap_or_else(|| format!("agent `{}` produced no output", self.name));
         let status = if result.success {
             Status::Ok
         } else {
@@ -177,13 +177,12 @@ impl Node for ScriptNode {
         NodeKind::Script
     }
 
-    /// The script is run via `sh -c` after templating (`render`) with `{task}`
-    /// and `{<var>}`. Interpolated values are NOT shell-escaped, so a template
-    /// that inlines an untrusted value (e.g. an agent/tool output that contains
-    /// shell metacharacters) can inject commands. Keep script templates author-
-    /// controlled and avoid interpolating untrusted node outputs into them.
+    /// The script is run via `sh -c` after templating with `{task}` and
+    /// `{<var>}`. Interpolated values are shell-escaped (single-quoted, see
+    /// [`render_shell`]) so a node output containing shell metacharacters is
+    /// treated as literal text rather than injected as commands.
     async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
-        let script = render(&self.script, state);
+        let script = render_shell(&self.script, state);
         let result = run_script(&script, None, &cx.cancel).await?;
         let status = if result.code == Some(0) {
             Status::Ok

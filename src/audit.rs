@@ -134,6 +134,8 @@ pub enum CompletionReason {
     Completed,
     Cancelled,
     StepLimit,
+    /// A node or routing step returned an error.
+    Error,
 }
 
 /// An [`AuditSink`] that appends JSON lines to a file.

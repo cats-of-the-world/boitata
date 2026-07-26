@@ -272,7 +272,16 @@ impl Executor {
             let kind = node.kind();
             debug!("Blueprint step {}: node `{current}` ({kind:?})", step + 1);
 
-            let update = node.run(&state, &cx).await?;
+            let update = match node.run(&state, &cx).await {
+                Ok(update) => update,
+                Err(e) => {
+                    self.emit(AuditEvent::BlueprintCompleted {
+                        steps: step + 1,
+                        reason: CompletionReason::Error,
+                    });
+                    return Err(e.context(format!("blueprint node `{current}` failed")));
+                }
+            };
             state.apply(update);
             let status = match state.status {
                 Some(Status::Failed) => NodeStatus::Failed,
@@ -289,7 +298,16 @@ impl Executor {
                 return Ok(state);
             }
 
-            let next = Self::route(graph, &current, &state)?;
+            let next = match Self::route(graph, &current, &state) {
+                Ok(next) => next,
+                Err(e) => {
+                    self.emit(AuditEvent::BlueprintCompleted {
+                        steps: step + 1,
+                        reason: CompletionReason::Error,
+                    });
+                    return Err(e.context(format!("routing after node `{current}`")));
+                }
+            };
             self.emit(AuditEvent::NodeExecuted {
                 step: step + 1,
                 node: current.clone(),

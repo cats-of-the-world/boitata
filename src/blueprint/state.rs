@@ -94,12 +94,24 @@ impl Update {
 }
 
 /// Substitute `{task}` and `{<var>}` placeholders in `template` from `state`.
-/// Unknown placeholders are left untouched.
+/// Unknown placeholders are left untouched. Used for LLM prompts (values are not
+/// escaped).
 ///
 /// Single pass over the template: substituted values are never re-scanned, so a
 /// value that itself contains `{...}` cannot trigger further substitution and the
 /// result does not depend on `vars` iteration order.
 pub fn render(template: &str, state: &State) -> String {
+    render_with(template, state, |value| value.to_string())
+}
+
+/// Like [`render`], but shell-escapes each substituted value (wraps it in single
+/// quotes) so interpolating untrusted state into a `sh -c` script cannot inject
+/// commands. Used by [`super::nodes::ScriptNode`].
+pub fn render_shell(template: &str, state: &State) -> String {
+    render_with(template, state, shell_single_quote)
+}
+
+fn render_with(template: &str, state: &State, escape: impl Fn(&str) -> String) -> String {
     let resolve = |key: &str| -> Option<&str> {
         if key == "task" {
             Some(state.task.as_str())
@@ -116,7 +128,7 @@ pub fn render(template: &str, state: &State) -> String {
             Some(close) => {
                 let key = &rest[open + 1..open + close];
                 match resolve(key) {
-                    Some(value) => out.push_str(value),
+                    Some(value) => out.push_str(&escape(value)),
                     // Unknown placeholder: keep it verbatim.
                     None => out.push_str(&rest[open..open + close + 1]),
                 }
@@ -130,6 +142,23 @@ pub fn render(template: &str, state: &State) -> String {
         }
     }
     out.push_str(rest);
+    out
+}
+
+/// Single-quote a value for safe inclusion in a `sh -c` command line: wrap in
+/// `'...'` and rewrite each embedded `'` as `'\''`. The result is a single shell
+/// word with no metacharacter interpretation.
+fn shell_single_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
     out
 }
 
@@ -181,5 +210,20 @@ mod tests {
     fn render_handles_unclosed_brace() {
         let state = State::new("t".to_string());
         assert_eq!(render("a {b", &state), "a {b");
+    }
+
+    #[test]
+    fn render_shell_escapes_interpolated_values() {
+        let mut state = State::new("t".to_string());
+        state.vars.insert("x".to_string(), "; rm -rf /".to_string());
+        // Metacharacters are neutralized inside single quotes.
+        assert_eq!(render_shell("echo {x}", &state), "echo '; rm -rf /'");
+
+        // Embedded single quote is closed, escaped, and reopened.
+        state.vars.insert("y".to_string(), "a'b".to_string());
+        assert_eq!(render_shell("echo {y}", &state), r"echo 'a'\''b'");
+
+        // Literal template text is untouched; only values are quoted.
+        assert_eq!(render_shell("ls {nope}", &state), "ls {nope}");
     }
 }
