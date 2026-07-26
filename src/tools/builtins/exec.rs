@@ -174,6 +174,10 @@ async fn read_capped<R: AsyncRead + Unpin>(
     let mut buf: Vec<u8> = Vec::new();
     let mut truncated = false;
     let mut spill: Option<(tokio::fs::File, PathBuf)> = None;
+    // Once a spill write fails we stop trying: retrying after the buffer has been
+    // trimmed would produce an incomplete file we'd wrongly report as the full
+    // output. The stream then keeps only its in-memory tail.
+    let mut spill_gave_up = false;
     let Some(reader) = pipe.as_mut() else {
         return CappedStream {
             bytes: buf,
@@ -191,17 +195,17 @@ async fn read_capped<R: AsyncRead + Unpin>(
             Ok(n) => {
                 let data = &chunk[..n];
                 // Already spilling: persist this chunk before it can be trimmed.
-                // If the write fails (e.g. disk full), a partial spill is worse
-                // than none — discard it so `finalize_stream` won't claim the
-                // full output was saved.
-                let mut write_failed = false;
-                if let Some((file, _)) = spill.as_mut() {
-                    write_failed = file.write_all(data).await.is_err();
-                }
+                // If the write fails (e.g. disk full), discard the partial spill
+                // and give up — a partial spill is worse than none.
+                let write_failed = match spill.as_mut() {
+                    Some((file, _)) => file.write_all(data).await.is_err(),
+                    None => false,
+                };
                 if write_failed {
+                    spill_gave_up = true;
                     if let Some((_, path)) = spill.take() {
                         tracing::warn!(
-                            "output spill write failed; discarding partial spill file {}",
+                            "output spill write failed; discarding partial spill file {} (tail only)",
                             path.display()
                         );
                         let _ = tokio::fs::remove_file(&path).await;
@@ -216,11 +220,23 @@ async fn read_capped<R: AsyncRead + Unpin>(
                     // so far. Nothing has been spilled yet, so `buf` holds the
                     // complete stream up to this point; subsequent chunks are
                     // written above before they can be trimmed.
-                    if spill.is_none() {
-                        if let Some((mut file, path)) = create_spill(label).await {
-                            if file.write_all(&buf).await.is_ok() {
-                                spill = Some((file, path));
+                    if spill.is_none() && !spill_gave_up {
+                        match create_spill(label).await {
+                            Some((mut file, path)) => {
+                                if file.write_all(&buf).await.is_ok() {
+                                    spill = Some((file, path));
+                                } else {
+                                    // The initial write failed; give up rather
+                                    // than retry from an already-trimmed buffer.
+                                    spill_gave_up = true;
+                                    tracing::warn!(
+                                        "output spill write failed; discarding spill file {} (tail only)",
+                                        path.display()
+                                    );
+                                    let _ = tokio::fs::remove_file(&path).await;
+                                }
                             }
+                            None => spill_gave_up = true,
                         }
                     }
                     truncated |= trim_front_to_cap(&mut buf, cap);
@@ -266,9 +282,12 @@ const SPILL_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// swept by [`cleanup_stale_spills`].
 async fn create_spill(label: &str) -> Option<(tokio::fs::File, PathBuf)> {
     // Prune stale spills from earlier runs on first use so they don't accumulate
-    // unbounded. Runs at most once per process.
+    // unbounded. Runs at most once per process, on the blocking pool so its
+    // synchronous filesystem I/O doesn't stall the async worker.
     static CLEANUP: std::sync::Once = std::sync::Once::new();
-    CLEANUP.call_once(cleanup_stale_spills);
+    CLEANUP.call_once(|| {
+        tokio::task::spawn_blocking(cleanup_stale_spills);
+    });
 
     let path = std::env::temp_dir().join(format!(
         "{SPILL_PREFIX}{label}-{}.log",
