@@ -51,6 +51,9 @@ libc = "0.2.189"
 # Command denylist patterns for the tool permission policy
 regex = "1.13.1"
 
+# Token counting for context-window management (tiktoken o200k_base)
+tiktoken-rs = "0.12"
+
 # MCP (Model Context Protocol) client
 rmcp = { version = "2.2.0", default-features = false, features = [
     "client",
@@ -83,6 +86,7 @@ chrono = { workspace = true }
 rmcp = { workspace = true }
 tokio-util = { workspace = true }
 regex = { workspace = true }
+tiktoken-rs = { workspace = true }
 
 # Unix-only: process-group kill for timed-out commands.
 [target.'cfg(unix)'.dependencies]

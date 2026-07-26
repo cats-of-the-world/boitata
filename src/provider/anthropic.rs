@@ -104,6 +104,11 @@ impl Provider for AnthropicProvider {
         self.max_tokens
     }
 
+    fn context_limit(&self) -> usize {
+        // Claude models expose a 200k-token context window.
+        200_000
+    }
+
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let anthropic_request = self.build_request(request);
 

@@ -67,6 +67,11 @@ pub struct Config {
     /// is denied by the policy.
     #[serde(default)]
     pub denied_commands: Vec<String>,
+    /// Fraction of the model's context window (0.0–1.0) at which older turns are
+    /// summarized to avoid overflow. Defaults to `0.8`; set to `0.0` to disable
+    /// compaction.
+    #[serde(default)]
+    pub auto_compact_threshold: Option<f32>,
 }
 
 /// A single MCP server. The transport is inferred from which field is set:
@@ -323,6 +328,7 @@ mod tests {
             confine_tools: None,
             tool_policy: None,
             denied_commands: Vec::new(),
+            auto_compact_threshold: None,
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("super-secret-key"), "{rendered}");
