@@ -7,6 +7,10 @@ use super::nodes::{AgentNode, ScriptNode, ToolNode};
 use super::state::Status;
 use super::{END, Graph, GraphBuilder};
 
+/// The names of every built-in blueprint, for help/error messages. Keep in sync
+/// with [`by_name`].
+pub const KNOWN: &[&str] = &["default"];
+
 /// Look up a built-in blueprint by name.
 pub fn by_name(name: &str) -> Option<Graph> {
     let builder = match name {

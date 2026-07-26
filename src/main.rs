@@ -264,8 +264,12 @@ async fn run_blueprint(
     audit: Option<Arc<audit::FileAuditLog>>,
     policy: ToolPolicy,
 ) -> anyhow::Result<()> {
-    let graph = blueprint::by_name(name)
-        .ok_or_else(|| anyhow::anyhow!("unknown blueprint `{name}` (known: default)"))?;
+    let graph = blueprint::by_name(name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown blueprint `{name}` (known: {})",
+            blueprint::KNOWN.join(", ")
+        )
+    })?;
 
     let mut executor = blueprint::Executor::new(provider, tools)
         .with_policy(policy)
@@ -274,6 +278,9 @@ async fn run_blueprint(
         .with_compact_threshold(config.auto_compact_threshold);
     if let Some(audit) = audit {
         executor = executor.with_audit(audit);
+    }
+    if let Some(max_steps) = config.blueprint_max_steps {
+        executor = executor.with_max_steps(max_steps);
     }
 
     info!("Running blueprint `{name}` on task: {task}");

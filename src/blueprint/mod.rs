@@ -10,7 +10,7 @@ mod library;
 mod nodes;
 mod state;
 
-pub use library::by_name;
+pub use library::{KNOWN, by_name};
 pub use state::{State, Status};
 
 use nodes::{Node, NodeCtx};
@@ -66,7 +66,8 @@ impl Graph {
             entry: entry.into(),
             nodes: HashMap::new(),
             edges: HashMap::new(),
-            duplicates: Vec::new(),
+            duplicate_nodes: Vec::new(),
+            duplicate_edges: Vec::new(),
         }
     }
 }
@@ -77,8 +78,10 @@ pub struct GraphBuilder {
     entry: String,
     nodes: HashMap<String, Box<dyn Node>>,
     edges: HashMap<String, Routing>,
-    /// Node names that were added more than once; rejected by `build`.
-    duplicates: Vec<String>,
+    /// Node names added more than once; rejected by `build`.
+    duplicate_nodes: Vec<String>,
+    /// Edge sources given more than one outgoing edge; rejected by `build`.
+    duplicate_edges: Vec<String>,
 }
 
 impl GraphBuilder {
@@ -87,39 +90,50 @@ impl GraphBuilder {
     pub fn node(mut self, node: impl Node + 'static) -> Self {
         let name = node.name().to_string();
         if self.nodes.insert(name.clone(), Box::new(node)).is_some() {
-            self.duplicates.push(name);
+            self.duplicate_nodes.push(name);
         }
         self
     }
 
-    /// Add an unconditional edge `from -> to` (`to` may be [`END`]).
+    /// Add an unconditional edge `from -> to` (`to` may be [`END`]). Defining
+    /// more than one outgoing edge for the same `from` is rejected by `build`.
     pub fn edge(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
-        self.edges.insert(from.into(), Routing::Static(to.into()));
+        self.insert_edge(from.into(), Routing::Static(to.into()));
         self
     }
 
     /// Add a conditional edge: after `from`, `router(state)` picks the next node
-    /// (or [`END`]).
+    /// (or [`END`]). Defining more than one outgoing edge for the same `from` is
+    /// rejected by `build`.
     pub fn conditional(
         mut self,
         from: impl Into<String>,
         router: impl Fn(&State) -> String + Send + Sync + 'static,
     ) -> Self {
-        self.edges
-            .insert(from.into(), Routing::Conditional(Box::new(router)));
+        self.insert_edge(from.into(), Routing::Conditional(Box::new(router)));
         self
+    }
+
+    fn insert_edge(&mut self, from: String, routing: Routing) {
+        if self.edges.insert(from.clone(), routing).is_some() {
+            self.duplicate_edges.push(from);
+        }
     }
 
     /// Validate and finalize the graph. Checks that the entry and all static
     /// edge endpoints refer to known nodes (or END). Conditional targets are
     /// checked at run time.
-    pub fn build(self) -> Result<Graph, BlueprintError> {
+    pub fn build(mut self) -> Result<Graph, BlueprintError> {
         let known = |id: &str| id == END || self.nodes.contains_key(id);
 
-        if !self.duplicates.is_empty() {
+        if let Some(dupes) = dedup_names(&mut self.duplicate_nodes) {
             return Err(BlueprintError::Invalid(format!(
-                "duplicate node name(s): {}",
-                self.duplicates.join(", ")
+                "duplicate node name(s): {dupes}"
+            )));
+        }
+        if let Some(dupes) = dedup_names(&mut self.duplicate_edges) {
+            return Err(BlueprintError::Invalid(format!(
+                "node(s) with more than one outgoing edge: {dupes}"
             )));
         }
         if !self.nodes.contains_key(&self.entry) {
@@ -149,6 +163,17 @@ impl GraphBuilder {
             edges: self.edges,
         })
     }
+}
+
+/// Sort and de-duplicate collected duplicate names; return them joined for an
+/// error message, or `None` if there were none.
+fn dedup_names(names: &mut Vec<String>) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    names.sort();
+    names.dedup();
+    Some(names.join(", "))
 }
 
 /// Runs blueprints. Carries the shared resources every node needs and the
@@ -200,6 +225,13 @@ impl Executor {
 
     pub fn with_compact_threshold(mut self, threshold: Option<f32>) -> Self {
         self.compact_threshold = threshold;
+        self
+    }
+
+    /// Cap on executed nodes before the run aborts, bounding cyclic graphs.
+    /// Defaults to [`DEFAULT_MAX_STEPS`].
+    pub fn with_max_steps(mut self, max_steps: usize) -> Self {
+        self.max_steps = max_steps;
         self
     }
 
@@ -498,9 +530,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let mut exec = executor();
-        exec.max_steps = 5;
-        let err = exec.run(&graph, "task".into()).await.unwrap_err();
+        let err = executor()
+            .with_max_steps(5)
+            .run(&graph, "task".into())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("step limit"));
         assert_eq!(runs.load(Ordering::SeqCst), 5);
     }
@@ -579,6 +613,23 @@ mod tests {
             .build();
         assert!(
             matches!(result, Err(BlueprintError::Invalid(msg)) if msg.contains("duplicate node"))
+        );
+    }
+
+    #[test]
+    fn build_rejects_duplicate_edges() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let result = Graph::builder("g", "a")
+            .node(CountingNode {
+                name: "a".into(),
+                status: Status::Ok,
+                runs,
+            })
+            .edge("a", END)
+            .edge("a", END) // second outgoing edge for `a`
+            .build();
+        assert!(
+            matches!(result, Err(BlueprintError::Invalid(msg)) if msg.contains("more than one outgoing edge"))
         );
     }
 }

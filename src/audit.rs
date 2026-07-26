@@ -111,7 +111,7 @@ pub enum AuditEvent {
 }
 
 /// Which kind of blueprint node ran.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     Agent,
@@ -120,7 +120,12 @@ pub enum NodeKind {
 }
 
 /// Outcome of a blueprint node.
-#[derive(Debug, Clone, Copy, Serialize)]
+///
+/// This mirrors `blueprint::state::Status` but is a distinct type on purpose:
+/// `audit` is a lower-level module that must not depend on `blueprint` (the
+/// dependency runs the other way). The executor maps `Status` to `NodeStatus` at
+/// the audit boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
     Ok,
@@ -128,7 +133,7 @@ pub enum NodeStatus {
 }
 
 /// Why a blueprint run ended.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionReason {
     Completed,
