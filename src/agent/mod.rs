@@ -8,7 +8,11 @@ use crate::audit::{AuditEvent, AuditSink};
 use crate::provider::{CompletionRequest, Provider, ProviderError, ToolCall};
 use crate::tools::{ToolOutput, ToolRegistry};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+/// Error string recorded when a run is stopped by cancellation (Ctrl-C).
+const CANCELLED_ERROR: &str = "Cancelled";
 
 /// A task to be executed by the agent
 #[derive(Debug, Clone)]
@@ -103,8 +107,60 @@ impl Agent {
         }
     }
 
-    /// Run a task
+    /// Record and build the result for a run cut short by cancellation. Shared by
+    /// the "cancelled while awaiting the model" and "cancelled mid-tool-batch"
+    /// paths so the two stay in lockstep.
+    fn cancelled_result(
+        &self,
+        iterations: usize,
+        tool_calls: Vec<ToolCallSummary>,
+        total_input_tokens: usize,
+        total_output_tokens: usize,
+    ) -> TaskResult {
+        self.emit(AuditEvent::RunCompleted {
+            success: false,
+            iterations,
+            error: Some(CANCELLED_ERROR.to_string()),
+            total_input_tokens,
+            total_output_tokens,
+        });
+        TaskResult {
+            success: false,
+            final_message: None,
+            iterations,
+            tool_calls,
+            error: Some(CANCELLED_ERROR.to_string()),
+        }
+    }
+
+    /// Run a task. Interrupts (Ctrl-C) cancel the in-flight tool and stop the
+    /// run; the running tool's subprocess/remote call is torn down promptly.
     pub async fn run(&self, task: Task) -> anyhow::Result<TaskResult> {
+        let cancel = CancellationToken::new();
+        // Cancel the run on Ctrl-C. The watcher is aborted once the run returns
+        // so it doesn't linger between runs.
+        let watcher = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    info!("Interrupt received; cancelling run");
+                    cancel.cancel();
+                }
+            })
+        };
+        let result = self.run_with_cancel(task, cancel).await;
+        watcher.abort();
+        result
+    }
+
+    /// Run a task under an external [`CancellationToken`]. Exposed for callers
+    /// (and tests) that want to drive cancellation directly; [`Agent::run`]
+    /// wraps this with a Ctrl-C watcher.
+    pub async fn run_with_cancel(
+        &self,
+        task: Task,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<TaskResult> {
         info!("Starting task: {}", task.description);
 
         let mut context = Context::new();
@@ -128,9 +184,24 @@ impl Agent {
             // Build the completion request
             let request = self.build_request(&context)?;
 
-            // Call the provider. On failure, record it before propagating so the
-            // audit log captures why an unattended run died (e.g. auth errors).
-            let response = match self.provider.complete(request).await {
+            // Call the provider, racing it against cancellation so Ctrl-C during
+            // the (often multi-second) LLM call stops the run promptly instead of
+            // waiting for the response. On failure, record it before propagating
+            // so the audit log captures why an unattended run died (e.g. auth).
+            let completion = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    warn!("Run cancelled while awaiting the model");
+                    return Ok(self.cancelled_result(
+                        iteration + 1,
+                        tool_calls,
+                        total_input_tokens,
+                        total_output_tokens,
+                    ));
+                }
+                completion = self.provider.complete(request) => completion,
+            };
+            let response = match completion {
                 Ok(response) => response,
                 Err(e) => {
                     let message = match e {
@@ -200,7 +271,9 @@ impl Agent {
             for tool_call in &response.tool_calls {
                 debug!("Executing tool: {}", tool_call.name);
 
-                let result = self.execute_tool_call(tool_call.clone()).await;
+                let result = self
+                    .execute_tool_call(tool_call.clone(), cancel.clone())
+                    .await;
                 let (output, is_error) = match result {
                     Ok(output) => (output, false),
                     Err(e) => (ToolOutput::text(format!("Error: {e}")), true),
@@ -231,6 +304,24 @@ impl Agent {
                 });
 
                 context.add_tool_result(&tool_call.id, output.content, is_error);
+
+                // Don't start the remaining tools in this batch if we were
+                // cancelled mid-batch; the post-loop check reports the outcome.
+                if cancel.is_cancelled() {
+                    break;
+                }
+            }
+
+            // Stop promptly if the run was cancelled while executing this
+            // iteration's tools (the running tool already returned an error).
+            if cancel.is_cancelled() {
+                warn!("Run cancelled after {} iteration(s)", iteration + 1);
+                return Ok(self.cancelled_result(
+                    iteration + 1,
+                    tool_calls,
+                    total_input_tokens,
+                    total_output_tokens,
+                ));
             }
         }
 
@@ -274,9 +365,13 @@ impl Agent {
         })
     }
 
-    async fn execute_tool_call(&self, tool_call: ToolCall) -> anyhow::Result<ToolOutput> {
+    async fn execute_tool_call(
+        &self,
+        tool_call: ToolCall,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<ToolOutput> {
         self.tools
-            .execute(&tool_call.name, &tool_call.arguments)
+            .execute(&tool_call.name, &tool_call.arguments, cancel)
             .await
             .map_err(|e| anyhow::anyhow!("Tool execution error: {}", e))
     }

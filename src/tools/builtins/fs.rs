@@ -4,6 +4,7 @@ use crate::tools::workspace;
 use crate::tools::{Result, Tool, ToolAnnotations, ToolError, ToolOutput};
 use async_trait::async_trait;
 use std::fs;
+use tokio_util::sync::CancellationToken;
 
 /// Run a blocking filesystem closure on the runtime's blocking pool so it
 /// doesn't stall the async executor. Maps a task panic to a tool error.
@@ -46,7 +47,11 @@ impl Tool for FileReadTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _cancel: CancellationToken,
+    ) -> Result<ToolOutput> {
         let path = arguments
             .get("path")
             .and_then(|v| v.as_str())
@@ -98,7 +103,11 @@ impl Tool for FileWriteTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _cancel: CancellationToken,
+    ) -> Result<ToolOutput> {
         let path = arguments
             .get("path")
             .and_then(|v| v.as_str())
@@ -161,7 +170,11 @@ impl Tool for ListDirectoryTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _cancel: CancellationToken,
+    ) -> Result<ToolOutput> {
         let path = arguments
             .get("path")
             .and_then(|v| v.as_str())
@@ -219,7 +232,10 @@ mod tests {
 
         let tool = FileReadTool;
         let result = tool
-            .execute(serde_json::json!({"path": file_path.to_str()}))
+            .execute(
+                serde_json::json!({"path": file_path.to_str()}),
+                CancellationToken::new(),
+            )
             .await;
 
         assert!(result.is_ok());
@@ -233,10 +249,13 @@ mod tests {
 
         let tool = FileWriteTool;
         let result = tool
-            .execute(serde_json::json!({
-                "path": file_path.to_str(),
-                "content": "Hello, World!"
-            }))
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str(),
+                    "content": "Hello, World!"
+                }),
+                CancellationToken::new(),
+            )
             .await;
 
         assert!(result.is_ok());
@@ -251,7 +270,10 @@ mod tests {
 
         let tool = ListDirectoryTool;
         let result = tool
-            .execute(serde_json::json!({"path": temp_dir.path().to_str()}))
+            .execute(
+                serde_json::json!({"path": temp_dir.path().to_str()}),
+                CancellationToken::new(),
+            )
             .await;
 
         assert!(result.is_ok());

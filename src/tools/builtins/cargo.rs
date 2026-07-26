@@ -6,6 +6,8 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use tokio_util::sync::CancellationToken;
+
 use super::exec;
 use crate::tools::{Result, Tool, ToolError, ToolOutput};
 
@@ -31,13 +33,14 @@ impl Tool for CargoCheckTool {
         json!({"type": "object", "properties": {"cwd": cwd_property()}})
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         exec::run(
             "cargo",
             vec!["check".to_string()],
             cwd.as_deref(),
             exec::BUILD_TIMEOUT,
+            &cancel,
         )
         .await
     }
@@ -67,7 +70,7 @@ impl Tool for CargoClippyTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["clippy".to_string()];
         if exec::opt_bool_arg(&arguments, "fix") {
@@ -75,7 +78,7 @@ impl Tool for CargoClippyTool {
             args.push("--allow-dirty".to_string());
             args.push("--allow-staged".to_string());
         }
-        exec::run("cargo", args, cwd.as_deref(), exec::BUILD_TIMEOUT).await
+        exec::run("cargo", args, cwd.as_deref(), exec::BUILD_TIMEOUT, &cancel).await
     }
 }
 
@@ -103,13 +106,20 @@ impl Tool for CargoFmtTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["fmt".to_string()];
         if exec::opt_bool_arg(&arguments, "check") {
             args.push("--check".to_string());
         }
-        exec::run("cargo", args, cwd.as_deref(), exec::DEFAULT_TIMEOUT).await
+        exec::run(
+            "cargo",
+            args,
+            cwd.as_deref(),
+            exec::DEFAULT_TIMEOUT,
+            &cancel,
+        )
+        .await
     }
 }
 
@@ -137,7 +147,7 @@ impl Tool for CargoTestTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["test".to_string()];
         if let Some(filter) = exec::opt_str_arg(&arguments, "filter") {
@@ -146,7 +156,7 @@ impl Tool for CargoTestTool {
             args.push("--".to_string());
             args.push(filter);
         }
-        exec::run("cargo", args, cwd.as_deref(), exec::BUILD_TIMEOUT).await
+        exec::run("cargo", args, cwd.as_deref(), exec::BUILD_TIMEOUT, &cancel).await
     }
 }
 
@@ -177,7 +187,7 @@ impl Tool for CargoAddTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let krate = exec::str_arg(&arguments, "crate", self.name())?;
         // Reject option-like names so a value such as "--config" can't be read
         // by `cargo add` as a flag instead of a crate spec.
@@ -213,6 +223,6 @@ impl Tool for CargoAddTool {
         // parsing so the crate spec that follows is never read as a flag.
         args.push("--".to_string());
         args.push(krate.to_string());
-        exec::run("cargo", args, cwd.as_deref(), exec::BUILD_TIMEOUT).await
+        exec::run("cargo", args, cwd.as_deref(), exec::BUILD_TIMEOUT, &cancel).await
     }
 }

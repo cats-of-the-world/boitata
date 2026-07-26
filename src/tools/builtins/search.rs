@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use tokio_util::sync::CancellationToken;
+
 use super::exec;
 use crate::tools::workspace;
 use crate::tools::{Result, Tool, ToolAnnotations, ToolError, ToolOutput};
@@ -38,7 +40,7 @@ impl Tool for SearchTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let pattern = exec::str_arg(&arguments, "pattern", self.name())?;
         if pattern.trim().is_empty() {
             // An empty/whitespace pattern is an empty regex that matches every
@@ -74,7 +76,7 @@ impl Tool for SearchTool {
         args.push(pattern.to_string());
         args.push(path);
 
-        let output = exec::run_raw("rg", args, None, exec::DEFAULT_TIMEOUT).await?;
+        let output = exec::run_raw("rg", args, None, exec::DEFAULT_TIMEOUT, &cancel).await?;
 
         // ripgrep exit codes: 0 = matches, 1 = no matches, 2 = error.
         match output.code {
@@ -124,14 +126,20 @@ mod tests {
         let path = dir.path().to_string_lossy().into_owned();
 
         let hit = SearchTool
-            .execute(serde_json::json!({"pattern": "needle", "path": path.clone()}))
+            .execute(
+                serde_json::json!({"pattern": "needle", "path": path.clone()}),
+                CancellationToken::new(),
+            )
             .await
             .unwrap()
             .to_text();
         assert!(hit.contains("needle"), "{hit}");
 
         let miss = SearchTool
-            .execute(serde_json::json!({"pattern": "zzz_absent", "path": path}))
+            .execute(
+                serde_json::json!({"pattern": "zzz_absent", "path": path}),
+                CancellationToken::new(),
+            )
             .await
             .unwrap()
             .to_text();

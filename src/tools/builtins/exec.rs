@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 use crate::tools::{Result, ToolError, ToolOutput};
 
@@ -26,14 +27,29 @@ pub(super) struct Output {
     pub stderr: String,
 }
 
-/// Run `program` with `args`, capturing output. Only returns `Err` when the
-/// process cannot be launched or exceeds `timeout`; a non-zero exit is a normal
-/// result so callers can decide how to interpret it.
+/// How a subprocess run ended: normally, by timeout, or by external cancellation.
+/// The `Finished` payload is the joined `(stdout, stderr, wait-status)` triple.
+type JoinedOutput = (
+    (Vec<u8>, bool),
+    (Vec<u8>, bool),
+    std::io::Result<std::process::ExitStatus>,
+);
+enum RunOutcome {
+    Finished(JoinedOutput),
+    TimedOut,
+    Cancelled,
+}
+
+/// Run `program` with `args`, capturing output. Returns `Err` only when the
+/// process cannot be launched, exceeds `timeout`, or is cancelled via `cancel`
+/// (`ToolError::Cancelled`); a non-zero exit is a normal result so callers can
+/// decide how to interpret it.
 pub(super) async fn run_raw(
     program: &str,
     args: Vec<String>,
     cwd: Option<&str>,
     timeout: Duration,
+    cancel: &CancellationToken,
 ) -> Result<Output> {
     let mut command = Command::new(program);
     command
@@ -75,16 +91,25 @@ pub(super) async fn run_raw(
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
 
-    let result = tokio::time::timeout(timeout, async {
-        let stdout = read_capped(&mut stdout_pipe, MAX_STREAM_BYTES);
-        let stderr = read_capped(&mut stderr_pipe, MAX_STREAM_BYTES);
-        let status = child.wait();
-        tokio::join!(stdout, stderr, status)
-    })
-    .await;
+    // Race the command against its timeout *and* an external cancellation (e.g.
+    // Ctrl-C). Either interruption kills the child's whole process group so
+    // forked grandchildren don't orphan.
+    let outcome = tokio::select! {
+        joined = tokio::time::timeout(timeout, async {
+            let stdout = read_capped(&mut stdout_pipe, MAX_STREAM_BYTES);
+            let stderr = read_capped(&mut stderr_pipe, MAX_STREAM_BYTES);
+            let status = child.wait();
+            tokio::join!(stdout, stderr, status)
+        }) => match joined {
+            Ok(joined) => RunOutcome::Finished(joined),
+            Err(_elapsed) => RunOutcome::TimedOut,
+        },
+        _ = cancel.cancelled() => RunOutcome::Cancelled,
+    };
 
-    match result {
-        Ok((stdout, stderr, status)) => {
+    let cancelled = matches!(outcome, RunOutcome::Cancelled);
+    match outcome {
+        RunOutcome::Finished((stdout, stderr, status)) => {
             let status = status
                 .map_err(|e| ToolError::ExecutionFailed(format!("`{program}` failed: {e}")))?;
             Ok(Output {
@@ -93,9 +118,10 @@ pub(super) async fn run_raw(
                 stderr: finalize_stream(stderr),
             })
         }
-        Err(_elapsed) => {
+        RunOutcome::TimedOut | RunOutcome::Cancelled => {
             // Kill the whole group while the child is still alive (its PID/PGID
-            // is still valid), then reap the child.
+            // is still valid), then reap the child. Both interruptions share this
+            // teardown; only the returned message differs.
             #[cfg(unix)]
             if let Some(pgid) = pgid {
                 // Safety: `pgid` is `child.id()`, and `child` is still alive here
@@ -110,10 +136,16 @@ pub(super) async fn run_raw(
             }
             let _ = child.start_kill();
             let _ = child.wait().await;
-            Err(ToolError::ExecutionFailed(format!(
-                "`{program}` timed out after {}s",
-                timeout.as_secs()
-            )))
+            // A cancel is a user interrupt, not a failure — surface it as such so
+            // logs can tell the two apart.
+            Err(if cancelled {
+                ToolError::Cancelled(format!("`{program}`"))
+            } else {
+                ToolError::ExecutionFailed(format!(
+                    "`{program}` timed out after {}s",
+                    timeout.as_secs()
+                ))
+            })
         }
     }
 }
@@ -188,8 +220,9 @@ pub(super) async fn run(
     args: Vec<String>,
     cwd: Option<&str>,
     timeout: Duration,
+    cancel: &CancellationToken,
 ) -> Result<ToolOutput> {
-    let output = run_raw(program, args, cwd, timeout).await?;
+    let output = run_raw(program, args, cwd, timeout, cancel).await?;
 
     let mut sections = Vec::new();
     match output.code {
@@ -243,9 +276,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_captures_stdout() {
-        let out = run("echo", vec!["hello".to_string()], None, DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        let out = run(
+            "echo",
+            vec!["hello".to_string()],
+            None,
+            DEFAULT_TIMEOUT,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(out.to_text(), "hello");
     }
 
@@ -257,6 +296,7 @@ mod tests {
             vec!["-c".to_string(), "exit 3".to_string()],
             None,
             DEFAULT_TIMEOUT,
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -266,9 +306,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_missing_program_errors() {
-        let err = run("boitata_nope_xyz", vec![], None, DEFAULT_TIMEOUT)
-            .await
-            .unwrap_err();
+        let err = run(
+            "boitata_nope_xyz",
+            vec![],
+            None,
+            DEFAULT_TIMEOUT,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed(_)));
     }
 
@@ -279,10 +325,30 @@ mod tests {
             vec!["5".to_string()],
             None,
             Duration::from_millis(100),
+            &CancellationToken::new(),
         )
         .await
         .unwrap_err();
         assert!(format!("{err}").contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_run_cancelled_returns_promptly() {
+        // A pre-cancelled token short-circuits the run: the child is spawned then
+        // its group is killed, and the error says "cancelled" (not "timed out"),
+        // well before the 30s timeout could fire.
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err = run(
+            "sleep",
+            vec!["30".to_string()],
+            None,
+            Duration::from_secs(30),
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err}").contains("cancelled"), "{err}");
     }
 
     #[tokio::test]

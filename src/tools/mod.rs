@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 // Re-export built-in tools
 pub use builtins::{
@@ -30,6 +31,12 @@ pub enum ToolError {
 
     #[error("Tool execution failed: {0}")]
     ExecutionFailed(String),
+
+    /// The tool was interrupted by cancellation (Ctrl-C) rather than failing.
+    /// Distinguished from `ExecutionFailed` so callers/logs can tell a user
+    /// interrupt from a genuine error.
+    #[error("{0} cancelled")]
+    Cancelled(String),
 
     #[error("Other error: {0}")]
     Other(String),
@@ -127,8 +134,16 @@ pub trait Tool: Send + Sync {
     /// Get the JSON schema for the tool's input arguments
     fn input_schema(&self) -> serde_json::Value;
 
-    /// Execute the tool with the given arguments
-    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput>;
+    /// Execute the tool with the given arguments.
+    ///
+    /// `cancel` is triggered when the run is interrupted (e.g. Ctrl-C).
+    /// Long-running tools (subprocesses, remote calls) should stop promptly when
+    /// it fires; quick, bounded tools may ignore it.
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput>;
 
     /// Side-effect hints for this tool. Defaults to the conservative
     /// [`ToolAnnotations::default`] (assume the tool may modify state); pure
@@ -184,14 +199,20 @@ impl ToolRegistry {
         true
     }
 
-    /// Execute a tool by name
-    pub async fn execute(&self, name: &str, arguments: &serde_json::Value) -> Result<ToolOutput> {
+    /// Execute a tool by name. `cancel` is forwarded to the tool so an
+    /// interrupted run can stop a long-running tool promptly.
+    pub async fn execute(
+        &self,
+        name: &str,
+        arguments: &serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput> {
         let tool = self
             .tools
             .get(name)
             .ok_or_else(|| ToolError::NotFound(name.to_string()))?;
 
-        tool.execute(arguments.clone()).await
+        tool.execute(arguments.clone(), cancel).await
     }
 
     /// Look up a registered tool's side-effect annotations, if it exists.
@@ -254,7 +275,11 @@ mod tests {
             })
         }
 
-        async fn execute(&self, _arguments: serde_json::Value) -> Result<ToolOutput> {
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _cancel: CancellationToken,
+        ) -> Result<ToolOutput> {
             Ok(ToolOutput::text("success"))
         }
     }
@@ -271,7 +296,9 @@ mod tests {
         assert!(registry.has_tool("dummy"));
         assert_eq!(registry.list_names(), vec!["dummy".to_string()]);
 
-        let result = registry.execute("dummy", &serde_json::json!({})).await;
+        let result = registry
+            .execute("dummy", &serde_json::json!({}), CancellationToken::new())
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().to_text(), "success");
     }

@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use tokio_util::sync::CancellationToken;
+
 use super::exec;
 use crate::tools::{Result, Tool, ToolAnnotations, ToolOutput};
 
@@ -45,7 +47,7 @@ impl Tool for ExecuteCommandTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: Value, cancel: CancellationToken) -> Result<ToolOutput> {
         let command = exec::str_arg(&arguments, "command", self.name())?;
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         exec::run(
@@ -53,6 +55,7 @@ impl Tool for ExecuteCommandTool {
             vec!["-c".to_string(), command.to_string()],
             cwd.as_deref(),
             exec::DEFAULT_TIMEOUT,
+            &cancel,
         )
         .await
     }
@@ -65,7 +68,10 @@ mod tests {
     #[tokio::test]
     async fn test_execute_command_runs_shell() {
         let out = ExecuteCommandTool
-            .execute(serde_json::json!({"command": "echo boitata"}))
+            .execute(
+                serde_json::json!({"command": "echo boitata"}),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         assert_eq!(out.to_text(), "boitata");
