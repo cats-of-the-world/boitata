@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
-use crate::tools::{Result, ToolError};
+use crate::tools::{Result, ToolError, ToolOutput};
 
 /// Default wall-clock limit for a single command.
 pub(super) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -188,7 +188,7 @@ pub(super) async fn run(
     args: Vec<String>,
     cwd: Option<&str>,
     timeout: Duration,
-) -> Result<String> {
+) -> Result<ToolOutput> {
     let output = run_raw(program, args, cwd, timeout).await?;
 
     let mut sections = Vec::new();
@@ -206,9 +206,11 @@ pub(super) async fn run(
         sections.push(format!("--- stderr ---\n{stderr}"));
     }
     if sections.is_empty() {
-        return Ok("(command completed successfully with no output)".to_string());
+        return Ok(ToolOutput::text(
+            "(command completed successfully with no output)",
+        ));
     }
-    Ok(sections.join("\n"))
+    Ok(ToolOutput::text(sections.join("\n")))
 }
 
 // --- argument helpers -------------------------------------------------------
@@ -244,7 +246,7 @@ mod tests {
         let out = run("echo", vec!["hello".to_string()], None, DEFAULT_TIMEOUT)
             .await
             .unwrap();
-        assert_eq!(out, "hello");
+        assert_eq!(out.to_text(), "hello");
     }
 
     #[tokio::test]
@@ -258,6 +260,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let out = out.to_text();
         assert!(out.contains("exit code 3"), "{out}");
     }
 

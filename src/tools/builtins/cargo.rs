@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::exec;
-use crate::tools::{Result, Tool, ToolError};
+use crate::tools::{Result, Tool, ToolError, ToolOutput};
 
 /// Optional working-directory property shared by the cargo tools.
 fn cwd_property() -> Value {
@@ -31,7 +31,7 @@ impl Tool for CargoCheckTool {
         json!({"type": "object", "properties": {"cwd": cwd_property()}})
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String> {
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         exec::run(
             "cargo",
@@ -67,7 +67,7 @@ impl Tool for CargoClippyTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String> {
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["clippy".to_string()];
         if exec::opt_bool_arg(&arguments, "fix") {
@@ -103,7 +103,7 @@ impl Tool for CargoFmtTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String> {
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["fmt".to_string()];
         if exec::opt_bool_arg(&arguments, "check") {
@@ -137,7 +137,7 @@ impl Tool for CargoTestTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String> {
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["test".to_string()];
         if let Some(filter) = exec::opt_str_arg(&arguments, "filter") {
@@ -177,7 +177,7 @@ impl Tool for CargoAddTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String> {
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
         let krate = exec::str_arg(&arguments, "crate", self.name())?;
         // Reject option-like names so a value such as "--config" can't be read
         // by `cargo add` as a flag instead of a crate spec.

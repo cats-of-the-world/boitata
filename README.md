@@ -205,7 +205,9 @@ you can reconstruct exactly what happened — including failures on unattended
 runs. The log is git-ignored and never contains your API key.
 
 Event types: `run_started`, `llm_response` (with token usage), `tool_call`
-(with arguments and result), and `run_completed` (success/error + token totals).
+(with arguments, result, and a `read_only` flag from the tool's annotations so
+you can tell observing calls from mutating ones), and `run_completed`
+(success/error + token totals).
 
 ```jsonl
 {"run_id":"c880…","timestamp":"2026-07-24T09:04:08+00:00","event":"run_started","task":"hello world","provider":"ollama","model":"llama3.2"}

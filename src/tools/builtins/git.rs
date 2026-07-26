@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::exec;
 use crate::tools::workspace;
-use crate::tools::{Result, Tool, ToolError};
+use crate::tools::{Result, Tool, ToolAnnotations, ToolError, ToolOutput};
 
 /// Shows the working-tree status.
 pub struct GitStatusTool;
@@ -23,6 +23,10 @@ impl Tool for GitStatusTool {
         "Show the git working-tree status (short format, with branch info)."
     }
 
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations::read_only()
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -32,7 +36,7 @@ impl Tool for GitStatusTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String> {
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         exec::run(
             "git",
@@ -64,6 +68,10 @@ impl Tool for GitDiffTool {
          those. Optionally limit to a path."
     }
 
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations::read_only()
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -75,7 +83,7 @@ impl Tool for GitDiffTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String> {
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["diff".to_string()];
         if exec::opt_bool_arg(&arguments, "staged") {
@@ -106,6 +114,15 @@ impl Tool for GitCommitTool {
          tracked modified files first (equivalent to `git commit -a`). Does not push."
     }
 
+    fn annotations(&self) -> ToolAnnotations {
+        // A commit modifies the repo but is reversible (`git reset`), so it is
+        // not destructive.
+        ToolAnnotations {
+            destructive: false,
+            ..ToolAnnotations::default()
+        }
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -118,7 +135,7 @@ impl Tool for GitCommitTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String> {
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
         let message = exec::str_arg(&arguments, "message", self.name())?;
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let mut args = vec!["commit".to_string()];
@@ -172,7 +189,7 @@ impl Tool for GitBranchTool {
         })
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String> {
+    async fn execute(&self, arguments: Value) -> Result<ToolOutput> {
         let cwd = exec::opt_str_arg(&arguments, "cwd");
         let action = exec::opt_str_arg(&arguments, "action").unwrap_or_else(|| "list".to_string());
 

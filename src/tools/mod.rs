@@ -3,7 +3,7 @@
 pub mod builtins;
 pub mod workspace;
 
-use crate::provider::ToolDefinition;
+use crate::provider::{ToolContent, ToolDefinition, tool_content_text};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,6 +35,86 @@ pub enum ToolError {
     Other(String),
 }
 
+/// Structured output from a tool: an ordered list of content parts (text and/or
+/// images), mirroring goose/MCP tool results. Most tools produce a single text
+/// part; use [`ToolOutput::text`] or the `From<String>`/`From<&str>`
+/// conversions for that common case.
+#[derive(Debug, Clone, Default)]
+pub struct ToolOutput {
+    pub content: Vec<ToolContent>,
+}
+
+impl ToolOutput {
+    /// A single text part.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![ToolContent::text(text)],
+        }
+    }
+
+    /// Flatten to a single string for text-only sinks (the CLI summary, the
+    /// audit log, and providers whose tool-result role accepts only text).
+    /// Images collapse to a short placeholder (see [`tool_content_text`]).
+    pub fn to_text(&self) -> String {
+        tool_content_text(&self.content)
+    }
+}
+
+impl From<String> for ToolOutput {
+    fn from(text: String) -> Self {
+        ToolOutput::text(text)
+    }
+}
+
+impl From<&str> for ToolOutput {
+    fn from(text: &str) -> Self {
+        ToolOutput::text(text)
+    }
+}
+
+/// Hints describing a tool's side effects, mirroring MCP `ToolAnnotations`.
+/// Used to drive local policy (e.g. auto-approving read-only tools) and for
+/// observability in the audit log.
+///
+/// The [`Default`] is deliberately conservative: assume a tool may make
+/// destructive changes to a closed environment. Read-only tools opt in via
+/// [`ToolAnnotations::read_only`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolAnnotations {
+    /// The tool does not modify its environment.
+    pub read_only: bool,
+    /// The tool may perform destructive/irreversible updates. Only meaningful
+    /// when `read_only` is false.
+    pub destructive: bool,
+    /// Repeated calls with the same arguments have no additional effect.
+    pub idempotent: bool,
+    /// The tool interacts with an open world (network, external systems).
+    pub open_world: bool,
+}
+
+impl Default for ToolAnnotations {
+    fn default() -> Self {
+        Self {
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            open_world: false,
+        }
+    }
+}
+
+impl ToolAnnotations {
+    /// A pure reader: no modifications, safe to repeat, closed world.
+    pub fn read_only() -> Self {
+        Self {
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+            open_world: false,
+        }
+    }
+}
+
 /// Trait for tools that can be executed by the agent
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -48,7 +128,14 @@ pub trait Tool: Send + Sync {
     fn input_schema(&self) -> serde_json::Value;
 
     /// Execute the tool with the given arguments
-    async fn execute(&self, arguments: serde_json::Value) -> Result<String>;
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput>;
+
+    /// Side-effect hints for this tool. Defaults to the conservative
+    /// [`ToolAnnotations::default`] (assume the tool may modify state); pure
+    /// readers should override this with [`ToolAnnotations::read_only`].
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations::default()
+    }
 }
 
 /// Registry for tools
@@ -98,13 +185,18 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name
-    pub async fn execute(&self, name: &str, arguments: &serde_json::Value) -> Result<String> {
+    pub async fn execute(&self, name: &str, arguments: &serde_json::Value) -> Result<ToolOutput> {
         let tool = self
             .tools
             .get(name)
             .ok_or_else(|| ToolError::NotFound(name.to_string()))?;
 
         tool.execute(arguments.clone()).await
+    }
+
+    /// Look up a registered tool's side-effect annotations, if it exists.
+    pub fn annotations(&self, name: &str) -> Option<ToolAnnotations> {
+        self.tools.get(name).map(|tool| tool.annotations())
     }
 
     /// Check if a tool exists
@@ -162,8 +254,8 @@ mod tests {
             })
         }
 
-        async fn execute(&self, _arguments: serde_json::Value) -> Result<String> {
-            Ok("success".to_string())
+        async fn execute(&self, _arguments: serde_json::Value) -> Result<ToolOutput> {
+            Ok(ToolOutput::text("success"))
         }
     }
 
@@ -181,7 +273,7 @@ mod tests {
 
         let result = registry.execute("dummy", &serde_json::json!({})).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "success");
+        assert_eq!(result.unwrap().to_text(), "success");
     }
 
     #[test]

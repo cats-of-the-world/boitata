@@ -1,7 +1,7 @@
 // File system tools
 
 use crate::tools::workspace;
-use crate::tools::{Result, Tool, ToolError};
+use crate::tools::{Result, Tool, ToolAnnotations, ToolError, ToolOutput};
 use async_trait::async_trait;
 use std::fs;
 
@@ -29,6 +29,10 @@ impl Tool for FileReadTool {
         "Read the contents of a file. Returns the file contents as a string."
     }
 
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations::read_only()
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -42,7 +46,7 @@ impl Tool for FileReadTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> Result<String> {
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput> {
         let path = arguments
             .get("path")
             .and_then(|v| v.as_str())
@@ -60,6 +64,7 @@ impl Tool for FileReadTool {
                 .map_err(|e| ToolError::ExecutionFailed(format!("failed to read file: {e}")))
         })
         .await
+        .map(ToolOutput::from)
     }
 }
 
@@ -93,7 +98,7 @@ impl Tool for FileWriteTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> Result<String> {
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput> {
         let path = arguments
             .get("path")
             .and_then(|v| v.as_str())
@@ -122,6 +127,7 @@ impl Tool for FileWriteTool {
             ))
         })
         .await
+        .map(ToolOutput::from)
     }
 }
 
@@ -138,6 +144,10 @@ impl Tool for ListDirectoryTool {
         "List the contents of a directory. Returns a list of file and directory names."
     }
 
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations::read_only()
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -151,7 +161,7 @@ impl Tool for ListDirectoryTool {
         })
     }
 
-    async fn execute(&self, arguments: serde_json::Value) -> Result<String> {
+    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolOutput> {
         let path = arguments
             .get("path")
             .and_then(|v| v.as_str())
@@ -192,6 +202,7 @@ impl Tool for ListDirectoryTool {
             Ok(result.join("\n"))
         })
         .await
+        .map(ToolOutput::from)
     }
 }
 
@@ -212,7 +223,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "Hello, World!");
+        assert_eq!(result.unwrap().to_text(), "Hello, World!");
     }
 
     #[tokio::test]
@@ -244,7 +255,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        let content = result.unwrap();
+        let content = result.unwrap().to_text();
         assert!(content.contains("file1.txt"));
         assert!(content.contains("file2.txt"));
     }

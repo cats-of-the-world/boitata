@@ -6,7 +6,7 @@
 
 use super::{
     Chunk, CompletionRequest, CompletionResponse, Message, MessageContent, MessageRole, Provider,
-    ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage,
+    ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage, tool_content_text,
 };
 use async_trait::async_trait;
 use reqwest::Client;
@@ -169,8 +169,10 @@ fn to_ollama_messages(system: Option<String>, messages: Vec<Message>) -> Vec<Oll
             MessageContent::ToolResults(results) => {
                 for result in results {
                     out.push(OllamaMessage {
+                        // Ollama tool messages carry a plain string, so image
+                        // content collapses to a placeholder (tool_content_text).
                         role: "tool".to_string(),
-                        content: result.content,
+                        content: tool_content_text(&result.content),
                         tool_calls: None,
                     });
                 }
