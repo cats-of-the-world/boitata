@@ -91,6 +91,21 @@ pub enum AuditEvent {
         total_input_tokens: usize,
         total_output_tokens: usize,
     },
+    /// A blueprint run began.
+    BlueprintStarted { blueprint: String, entry: String },
+    /// A blueprint node ran and routing chose the next node.
+    NodeExecuted {
+        step: usize,
+        node: String,
+        /// Node kind: "agent", "tool", or "script".
+        kind: String,
+        /// State status after the node ran ("ok" | "failed").
+        status: String,
+        /// The next node the run moves to (or the END sentinel).
+        next: String,
+    },
+    /// A blueprint run finished ("completed", "cancelled", or "step_limit").
+    BlueprintCompleted { steps: usize, reason: String },
 }
 
 /// An [`AuditSink`] that appends JSON lines to a file.

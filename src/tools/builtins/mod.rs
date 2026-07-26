@@ -2,6 +2,9 @@
 
 mod exec;
 
+// Shell-script execution for blueprint script nodes (returns the exit code).
+pub use exec::run_script;
+
 pub mod cargo;
 pub mod command;
 pub mod fs;

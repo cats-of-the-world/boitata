@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 pub use builtins::{
     CargoAddTool, CargoCheckTool, CargoClippyTool, CargoFmtTool, CargoTestTool, ExecuteCommandTool,
     FileEditTool, FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool,
-    GitStatusTool, ListDirectoryTool, SearchTool,
+    GitStatusTool, ListDirectoryTool, SearchTool, run_script,
 };
 
 /// Result type for tool operations
