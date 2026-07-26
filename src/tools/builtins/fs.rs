@@ -361,8 +361,27 @@ impl Tool for FileEditTool {
                 }
             })?;
 
-            fs::write(&confined, &new_content)
-                .map_err(|e| ToolError::ExecutionFailed(format!("failed to write file: {e}")))?;
+            // Write atomically: write a sibling temp file then rename over the
+            // original, so a failure mid-write (disk full, crash) never leaves
+            // the file truncated. The temp lives in the same directory so the
+            // rename stays on one filesystem.
+            let tmp = confined.with_file_name(format!(
+                ".{}.boitata-{}.tmp",
+                confined
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                uuid::Uuid::new_v4()
+            ));
+            fs::write(&tmp, &new_content).map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to write temp file: {e}"))
+            })?;
+            if let Err(e) = fs::rename(&tmp, &confined) {
+                let _ = fs::remove_file(&tmp);
+                return Err(ToolError::ExecutionFailed(format!(
+                    "failed to replace file: {e}"
+                )));
+            }
 
             // Show the edited region (a few lines of context) so the caller can
             // verify the change landed where intended.
