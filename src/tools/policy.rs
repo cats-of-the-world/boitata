@@ -8,6 +8,13 @@
 // Two, composable controls:
 //   - a `mode` that can restrict the agent to read-only tools, and
 //   - a denylist of regexes matched against `execute_command` command strings.
+//
+// WARNING: the regex denylist is best-effort. `execute_command` runs via
+// `sh -c`, so the command undergoes full shell interpretation (flag splitting,
+// variable/wildcard expansion, quoting, metacharacters) that a regex over the
+// raw string can't see — e.g. `rm\s+-rf\s+/` won't catch `rm -r -f /` or
+// `rm -rf ${HOME}`. For a hard guarantee, restrict to read-only mode or disable
+// `execute_command` entirely (`allow_execute_command = false`).
 
 use regex::Regex;
 use serde::Deserialize;
@@ -84,13 +91,26 @@ impl ToolPolicy {
 
         // The denylist targets arbitrary shell execution — the one tool that can
         // run anything. Structured tools (cargo_*, git_*, ...) aren't matched.
-        if tool_name == "execute_command" {
-            if let Some(command) = arguments.get("command").and_then(|v| v.as_str()) {
-                if let Some(re) = self.denied_commands.iter().find(|re| re.is_match(command)) {
-                    return Decision::Deny(format!(
-                        "command blocked by policy (matched `{}`)",
-                        re.as_str()
-                    ));
+        // Only inspect arguments when a denylist is actually configured.
+        if tool_name == "execute_command" && !self.denied_commands.is_empty() {
+            match arguments.get("command").and_then(|v| v.as_str()) {
+                Some(command) => {
+                    if let Some(re) = self.denied_commands.iter().find(|re| re.is_match(command)) {
+                        return Decision::Deny(format!(
+                            "command blocked by policy (matched `{}`)",
+                            re.as_str()
+                        ));
+                    }
+                }
+                // Fail closed: a denylist is active but the command can't be
+                // inspected (missing or non-string), so deny rather than let a
+                // malformed payload slip past the gate.
+                None => {
+                    return Decision::Deny(
+                        "execute_command called without an inspectable `command` \
+                         string while a command denylist is active"
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -158,6 +178,27 @@ mod tests {
                 None,
                 &serde_json::json!({"command": "ls -la"})
             ),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn test_denylist_fails_closed_on_missing_command() {
+        let policy = ToolPolicy::new(PolicyMode::AllowAll, &[r"rm".to_string()]).unwrap();
+        // Denylist active but no inspectable command string -> deny.
+        assert!(matches!(
+            policy.decide("execute_command", None, &serde_json::json!({})),
+            Decision::Deny(_)
+        ));
+        assert!(matches!(
+            policy.decide("execute_command", None, &serde_json::json!({"command": 42})),
+            Decision::Deny(_)
+        ));
+        // With no denylist configured, a missing command is not the policy's
+        // concern (the tool itself will reject it) -> allow.
+        let permissive = ToolPolicy::allow_all();
+        assert_eq!(
+            permissive.decide("execute_command", None, &serde_json::json!({})),
             Decision::Allow
         );
     }

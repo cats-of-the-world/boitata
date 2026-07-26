@@ -315,11 +315,8 @@ impl Agent {
                 // Flatten to text for the text-only sinks (audit log + CLI
                 // summary); the structured content is carried into the context.
                 let text = output.to_text();
-                let read_only = self
-                    .tools
-                    .annotations(&tool_call.name)
-                    .map(|a| a.read_only)
-                    .unwrap_or(false);
+                // Reuse the annotations already fetched for the policy decision.
+                let read_only = annotations.map(|a| a.read_only).unwrap_or(false);
 
                 self.emit(AuditEvent::ToolCall {
                     iteration: iteration + 1,
