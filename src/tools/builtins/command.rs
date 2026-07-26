@@ -3,9 +3,10 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use tokio_util::sync::CancellationToken;
+
 use super::exec;
 use crate::tools::{Result, Tool, ToolAnnotations, ToolOutput};
-use tokio_util::sync::CancellationToken;
 
 /// Runs a shell command. This is the escape hatch for operations without a
 /// dedicated tool; it runs with the agent's privileges, so deployments that want

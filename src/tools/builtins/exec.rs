@@ -40,9 +40,10 @@ enum RunOutcome {
     Cancelled,
 }
 
-/// Run `program` with `args`, capturing output. Only returns `Err` when the
-/// process cannot be launched or exceeds `timeout`; a non-zero exit is a normal
-/// result so callers can decide how to interpret it.
+/// Run `program` with `args`, capturing output. Returns `Err` only when the
+/// process cannot be launched, exceeds `timeout`, or is cancelled via `cancel`
+/// (`ToolError::Cancelled`); a non-zero exit is a normal result so callers can
+/// decide how to interpret it.
 pub(super) async fn run_raw(
     program: &str,
     args: Vec<String>,

@@ -6,10 +6,11 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use tokio_util::sync::CancellationToken;
+
 use super::exec;
 use crate::tools::workspace;
 use crate::tools::{Result, Tool, ToolAnnotations, ToolError, ToolOutput};
-use tokio_util::sync::CancellationToken;
 
 /// Shows the working-tree status.
 pub struct GitStatusTool;
