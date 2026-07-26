@@ -145,13 +145,14 @@ impl Context {
     /// Estimate the tokens this context would occupy in a completion request,
     /// including the system prompt and tool definitions. Used to decide when to
     /// compact (see [`needs_compaction`]).
-    pub fn token_count(
-        &self,
-        counter: &TokenCounter,
-        tools: &[crate::provider::ToolDefinition],
-    ) -> usize {
+    ///
+    /// `tool_tokens` is the run-constant tool-schema count from
+    /// [`TokenCounter::count_tokens_for_tools`]; the caller computes it once and
+    /// passes it in so it isn't recomputed every iteration. Counting happens over
+    /// the internal messages directly, avoiding a clone of the whole history.
+    pub fn token_count(&self, counter: &TokenCounter, tool_tokens: usize) -> usize {
         let system = self.system_prompt.as_deref().unwrap_or("");
-        counter.count_chat_tokens(system, &self.to_messages(), tools)
+        counter.count_context_tokens(system, &self.messages, tool_tokens)
     }
 
     /// Get the number of messages
@@ -211,5 +212,29 @@ mod tests {
         ctx.add_user_message("Hello");
         ctx.clear();
         assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn token_count_grows_with_history_and_tools() {
+        let counter = TokenCounter::new();
+        let mut ctx = Context::new();
+        ctx.set_system_prompt("system".to_string());
+
+        let base = ctx.token_count(&counter, 0);
+        ctx.add_user_message("do the thing");
+        let with_msg = ctx.token_count(&counter, 0);
+        assert!(with_msg > base, "adding a message should raise the count");
+
+        // The tool-schema tokens are added on top.
+        assert!(ctx.token_count(&counter, 100) > with_msg);
+    }
+
+    #[test]
+    fn token_count_includes_tool_results() {
+        let counter = TokenCounter::new();
+        let mut ctx = Context::new();
+        let before = ctx.token_count(&counter, 0);
+        ctx.add_tool_result("t1", vec![ToolContent::text("some tool output")], false);
+        assert!(ctx.token_count(&counter, 0) > before);
     }
 }

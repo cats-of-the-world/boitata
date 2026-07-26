@@ -7,7 +7,8 @@ use std::sync::OnceLock;
 
 use tiktoken_rs::CoreBPE;
 
-use crate::provider::{Message, MessageContent, ToolDefinition, tool_content_text};
+use super::{ContextContent, ContextMessage};
+use crate::provider::{ToolDefinition, tool_content_text};
 
 /// Per-message framing overhead (role + delimiters).
 const TOKENS_PER_MESSAGE: usize = 4;
@@ -23,13 +24,24 @@ const PROP_KEY: usize = 3;
 const FUNC_END: usize = 12;
 
 /// The shared, lazily-initialized tokenizer. Loading the BPE table is not free, so
-/// it is built once and reused for the life of the process.
-fn bpe() -> &'static CoreBPE {
-    static BPE: OnceLock<CoreBPE> = OnceLock::new();
-    BPE.get_or_init(|| tiktoken_rs::o200k_base().expect("load o200k_base tokenizer"))
+/// it is built once and reused for the life of the process. If it ever fails to
+/// load we cache the failure (`None`) and fall back to a rough estimate rather than
+/// panicking — token counting is on the best-effort compaction path.
+fn bpe() -> Option<&'static CoreBPE> {
+    static BPE: OnceLock<Option<CoreBPE>> = OnceLock::new();
+    BPE.get_or_init(|| match tiktoken_rs::o200k_base() {
+        Ok(bpe) => Some(bpe),
+        Err(e) => {
+            tracing::warn!(
+                "failed to load o200k_base tokenizer ({e}); using a rough token estimate"
+            );
+            None
+        }
+    })
+    .as_ref()
 }
 
-/// Counts tokens for text, tool schemas, and whole chat requests.
+/// Counts tokens for text, tool schemas, and whole conversations.
 #[derive(Debug, Clone, Default)]
 pub struct TokenCounter;
 
@@ -38,14 +50,23 @@ impl TokenCounter {
         Self
     }
 
-    /// Count the tokens in a piece of text.
+    /// Count the tokens in a piece of text. Synchronous and CPU-bound; callers on
+    /// the async path keep it cheap by counting incrementally over borrowed
+    /// content (see [`Self::count_context_tokens`]) rather than re-tokenizing
+    /// whole cloned histories.
     pub fn count_tokens(&self, text: &str) -> usize {
-        bpe().encode_ordinary(text).len()
+        match bpe() {
+            Some(bpe) => bpe.encode_ordinary(text).len(),
+            // Fallback (~4 chars/token) so the agent keeps running if the
+            // tokenizer failed to load.
+            None => text.len().div_ceil(4),
+        }
     }
 
     /// Count the tokens the tool definitions add to a request: fixed structural
     /// overhead per function and per property, plus the tokenized names,
-    /// descriptions, and schema contents.
+    /// descriptions, and schema contents. The result is constant for a run, so
+    /// callers compute it once and reuse it (see [`Self::count_context_tokens`]).
     pub fn count_tokens_for_tools(&self, tools: &[ToolDefinition]) -> usize {
         let mut total = 0;
         for tool in tools {
@@ -69,46 +90,46 @@ impl TokenCounter {
         total
     }
 
-    /// Estimate the total prompt tokens for a completion request: the system
-    /// prompt, every message (with per-message overhead), the tool definitions,
-    /// and the reply primer.
-    pub fn count_chat_tokens(
+    /// Estimate the total prompt tokens for a conversation: the system prompt,
+    /// every message (with per-message overhead), the tool definitions, and the
+    /// reply primer.
+    ///
+    /// Counts directly over the context's internal messages to avoid cloning the
+    /// whole history each call. `tool_tokens` is the (run-constant) tool schema
+    /// count from [`Self::count_tokens_for_tools`], passed in so it isn't
+    /// recomputed every iteration.
+    pub(super) fn count_context_tokens(
         &self,
         system_prompt: &str,
-        messages: &[Message],
-        tools: &[ToolDefinition],
+        messages: &[ContextMessage],
+        tool_tokens: usize,
     ) -> usize {
         let mut total = SYSTEM_OVERHEAD + self.count_tokens(system_prompt);
-
         for message in messages {
-            total += TOKENS_PER_MESSAGE + self.count_tokens(&message_text(&message.content));
+            total += TOKENS_PER_MESSAGE + self.count_content(&message.content);
         }
-
-        total += self.count_tokens_for_tools(tools);
-        total + REPLY_PRIMER
+        total + tool_tokens + REPLY_PRIMER
     }
-}
 
-/// Flatten a message's content to the text we count. Tool-call arguments and tool
-/// results are counted as their serialized form (images collapse to a short
-/// placeholder via [`tool_content_text`]).
-fn message_text(content: &MessageContent) -> String {
-    match content {
-        MessageContent::Text(text) => text.clone(),
-        MessageContent::ToolResults(results) => results
-            .iter()
-            .map(|r| tool_content_text(&r.content))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        MessageContent::ToolUse { text, tool_calls } => {
-            let mut parts = Vec::new();
-            if let Some(text) = text {
-                parts.push(text.clone());
+    /// Count the tokens in one message's content, summing over its parts without
+    /// building an intermediate joined string. Tool-call arguments and tool
+    /// results are counted as their serialized form (images collapse to a short
+    /// placeholder via [`tool_content_text`]).
+    fn count_content(&self, content: &ContextContent) -> usize {
+        match content {
+            ContextContent::Text(text) => self.count_tokens(text),
+            ContextContent::ToolResults(results) => results
+                .iter()
+                .map(|r| self.count_tokens(&tool_content_text(&r.content)))
+                .sum(),
+            ContextContent::ToolUse { text, tool_calls } => {
+                let mut total = text.as_deref().map(|t| self.count_tokens(t)).unwrap_or(0);
+                for call in tool_calls {
+                    total += self.count_tokens(&call.name);
+                    total += self.count_tokens(&call.arguments.to_string());
+                }
+                total
             }
-            for call in tool_calls {
-                parts.push(format!("{}({})", call.name, call.arguments));
-            }
-            parts.join("\n")
         }
     }
 }
@@ -116,7 +137,6 @@ fn message_text(content: &MessageContent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{MessageRole, ToolContent, ToolResult};
 
     #[test]
     fn counts_are_nonzero_and_monotonic() {
@@ -142,28 +162,5 @@ mod tests {
         let two = counter.count_tokens_for_tools(&[tool.clone(), tool]);
         assert!(one > 0);
         assert!(two > one);
-    }
-
-    #[test]
-    fn chat_tokens_include_messages_and_overhead() {
-        let counter = TokenCounter::new();
-        let messages = vec![Message {
-            role: MessageRole::User,
-            content: MessageContent::Text("do the thing".to_string()),
-        }];
-        let with_msg = counter.count_chat_tokens("system", &messages, &[]);
-        let empty = counter.count_chat_tokens("system", &[], &[]);
-        assert!(with_msg > empty);
-    }
-
-    #[test]
-    fn tool_results_are_counted() {
-        let counter = TokenCounter::new();
-        let text = message_text(&MessageContent::ToolResults(vec![ToolResult {
-            tool_call_id: "t1".to_string(),
-            content: vec![ToolContent::text("some output")],
-            is_error: Some(false),
-        }]));
-        assert!(counter.count_tokens(&text) > 0);
     }
 }

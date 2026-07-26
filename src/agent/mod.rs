@@ -103,8 +103,17 @@ impl Agent {
 
     /// Set the fraction of the model's context window at which older turns are
     /// summarized into a synopsis. `0.0` disables compaction.
+    ///
+    /// The value is clamped to `[0.0, 1.0]`: a fraction above 1.0 could never be
+    /// reached (so compaction would never fire), and `NaN` would slip past the
+    /// comparison guards and silently disable compaction — both are treated as
+    /// misconfiguration and corrected.
     pub fn with_compact_threshold(mut self, threshold: f32) -> Self {
-        self.compact_threshold = threshold;
+        self.compact_threshold = if threshold.is_nan() {
+            DEFAULT_COMPACT_THRESHOLD
+        } else {
+            threshold.clamp(0.0, 1.0)
+        };
         self
     }
 
@@ -197,13 +206,15 @@ impl Agent {
         let mut total_output_tokens = 0usize;
 
         // Tokenizer and tool definitions are fixed for the run; build them once and
-        // reuse them when deciding whether to compact each iteration.
+        // reuse them every iteration (for both the request and compaction checks).
+        // The tool-schema token count is likewise constant, so compute it once.
         let counter = TokenCounter::new();
         let tool_defs = if self.provider.supports_tools() {
             self.tools.to_definitions()
         } else {
             Vec::new()
         };
+        let tool_tokens = counter.count_tokens_for_tools(&tool_defs);
 
         // Record the system prompt on the context so token accounting reflects it
         // (it is a fixed, non-trivial share of every request).
@@ -224,11 +235,12 @@ impl Agent {
             // Summarize older turns if we're approaching the context window, so a
             // long run compacts instead of overflowing. Best-effort: on failure we
             // proceed and let the provider's own limit be the backstop.
-            self.maybe_compact(&mut context, &counter, &tool_defs, iteration, &cancel)
+            self.maybe_compact(&mut context, &counter, tool_tokens, iteration, &cancel)
                 .await;
 
-            // Build the completion request
-            let request = self.build_request(&context)?;
+            // Build the completion request, reusing the tool definitions computed
+            // once above rather than rebuilding them each iteration.
+            let request = self.build_request(&context, &tool_defs)?;
 
             // Call the provider, racing it against cancellation so Ctrl-C during
             // the (often multi-second) LLM call stops the run promptly instead of
@@ -420,12 +432,17 @@ impl Agent {
         })
     }
 
-    fn build_request(&self, context: &Context) -> Result<CompletionRequest, ProviderError> {
+    fn build_request(
+        &self,
+        context: &Context,
+        tool_defs: &[ToolDefinition],
+    ) -> Result<CompletionRequest, ProviderError> {
         let messages = context.to_messages();
 
-        // Add tool definitions if the provider supports them
+        // Reuse the precomputed tool definitions (`tool_defs` is empty when the
+        // provider doesn't support tools).
         let tools = if self.provider.supports_tools() {
-            Some(self.tools.to_definitions())
+            Some(tool_defs.to_vec())
         } else {
             None
         };
@@ -447,14 +464,14 @@ impl Agent {
         &self,
         context: &mut Context,
         counter: &TokenCounter,
-        tool_defs: &[ToolDefinition],
+        tool_tokens: usize,
         iteration: usize,
         cancel: &CancellationToken,
     ) {
         if self.compact_threshold <= 0.0 {
             return;
         }
-        let used = context.token_count(counter, tool_defs);
+        let used = context.token_count(counter, tool_tokens);
         if !needs_compaction(used, self.provider.context_limit(), self.compact_threshold) {
             return;
         }
@@ -497,7 +514,7 @@ impl Agent {
         }
 
         apply_summary(context, cutoff, summary);
-        let tokens_after = context.token_count(counter, tool_defs);
+        let tokens_after = context.token_count(counter, tool_tokens);
         info!(
             "Compacted context: {messages_before} -> {} messages (~{used} -> ~{tokens_after} tokens)",
             context.len()

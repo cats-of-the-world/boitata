@@ -6,12 +6,20 @@
 // The mechanics here are deterministic and testable; the actual model call that
 // produces the summary is driven by the agent, which owns the provider.
 
+use std::borrow::Cow;
+
 use super::{Context, ContextContent, ContextMessage};
 use crate::provider::{MessageRole, tool_content_text};
 
 /// How many of the most recent messages to keep verbatim when summarizing. The
 /// cutoff is snapped to a turn boundary, so the number kept is approximate.
 pub const KEEP_RECENT_MESSAGES: usize = 6;
+
+/// Maximum characters of any single tool-argument blob or tool-result body fed
+/// into the summarization prompt. A giant payload (e.g. a whole-file write or a
+/// large file read) is truncated so it can't blow up the very call meant to
+/// shrink the context.
+const MAX_RENDERED_PART: usize = 2000;
 
 /// Prefix on the synthetic user message that carries the summary back into the
 /// conversation.
@@ -66,39 +74,63 @@ pub fn pick_cutoff(ctx: &Context, keep_recent: usize) -> Option<usize> {
 }
 
 /// Render the messages in `[0..cutoff)` to plain text for the summarization call.
+/// Built directly into one `String` (no intermediate `Vec`), with oversized parts
+/// truncated (see [`MAX_RENDERED_PART`]).
 pub fn render_for_summary(ctx: &Context, cutoff: usize) -> String {
-    ctx.messages[..cutoff]
-        .iter()
-        .map(render_message)
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    let mut out = String::new();
+    for (i, message) in ctx.messages[..cutoff].iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        render_message_into(&mut out, message);
+    }
+    out
 }
 
-fn render_message(message: &ContextMessage) -> String {
-    let (label, body) = match &message.content {
-        ContextContent::Text(text) => (role_label(&message.role), text.clone()),
+fn render_message_into(out: &mut String, message: &ContextMessage) {
+    match &message.content {
+        ContextContent::Text(text) => {
+            out.push_str(role_label(&message.role));
+            out.push_str(": ");
+            out.push_str(&truncated(text));
+        }
         ContextContent::ToolResults(results) => {
-            let body = results
-                .iter()
-                .map(|r| tool_content_text(&r.content))
-                .collect::<Vec<_>>()
-                .join("\n");
-            ("Tool results", body)
+            out.push_str("Tool results:");
+            for r in results {
+                out.push('\n');
+                out.push_str(&truncated(&tool_content_text(&r.content)));
+            }
         }
         ContextContent::ToolUse { text, tool_calls } => {
-            let mut parts = Vec::new();
+            out.push_str("Assistant:");
             if let Some(text) = text {
                 if !text.is_empty() {
-                    parts.push(text.clone());
+                    out.push(' ');
+                    out.push_str(&truncated(text));
                 }
             }
             for call in tool_calls {
-                parts.push(format!("[calls {}({})]", call.name, call.arguments));
+                out.push_str(&format!(
+                    " [calls {}({})]",
+                    call.name,
+                    truncated(&call.arguments.to_string())
+                ));
             }
-            ("Assistant", parts.join("\n"))
         }
-    };
-    format!("{label}: {body}")
+    }
+}
+
+/// Cap `s` at [`MAX_RENDERED_PART`] characters, on a UTF-8 boundary, appending a
+/// note about how much was dropped. Returns the input borrowed when it fits.
+fn truncated(s: &str) -> Cow<'_, str> {
+    if s.len() <= MAX_RENDERED_PART {
+        return Cow::Borrowed(s);
+    }
+    let mut end = MAX_RENDERED_PART;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    Cow::Owned(format!("{}… [{} more chars]", &s[..end], s.len() - end))
 }
 
 fn role_label(role: &MessageRole) -> &'static str {
@@ -169,6 +201,27 @@ mod tests {
     fn no_cutoff_for_short_history() {
         let ctx = conversation(1); // 3 messages, below keep-recent
         assert!(pick_cutoff(&ctx, KEEP_RECENT_MESSAGES).is_none());
+    }
+
+    #[test]
+    fn render_truncates_oversized_parts() {
+        let mut ctx = Context::new();
+        ctx.add_user_message("task");
+        let huge = "x".repeat(MAX_RENDERED_PART * 3);
+        ctx.add_tool_result("id", vec![crate::provider::ToolContent::text(huge)], false);
+        // Need an assistant boundary after the results so cutoff can include them.
+        ctx.add_assistant_tool_use(None, vec![tool_use("t")]);
+
+        let rendered = render_for_summary(&ctx, 3);
+        assert!(
+            rendered.contains("more chars]"),
+            "oversized body kept in full"
+        );
+        assert!(
+            rendered.len() < MAX_RENDERED_PART * 2,
+            "rendered output should be bounded, was {}",
+            rendered.len()
+        );
     }
 
     #[test]
