@@ -286,9 +286,15 @@ async fn run_blueprint(
     info!("Running blueprint `{name}` on task: {task}");
     let state = executor.run(&graph, task).await?;
 
-    println!("---");
-    for (node, text) in state.transcript() {
-        println!("[{node}]\n{text}\n");
+    // Write the transcript directly, ignoring write errors: a broken pipe (output
+    // piped into a command that exits early) must not panic the process.
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "---");
+        for (node, text) in state.transcript() {
+            let _ = writeln!(out, "[{node}]\n{text}\n");
+        }
     }
     match state.status {
         Some(blueprint::Status::Ok) => {

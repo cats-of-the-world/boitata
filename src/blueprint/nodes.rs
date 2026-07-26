@@ -91,15 +91,18 @@ impl Node for AgentNode {
             .run_with_cancel(Task::new(prompt), cx.cancel.clone())
             .await?;
 
-        let text = result
-            .final_message
-            .or(result.error)
-            .unwrap_or_else(|| format!("agent `{}` produced no output", self.name));
         let status = if result.success {
             Status::Ok
         } else {
             Status::Failed
         };
+        let text = result.final_message.or(result.error).unwrap_or_else(|| {
+            if result.success {
+                format!("agent `{}` produced no output", self.name)
+            } else {
+                format!("agent `{}` failed with no error message", self.name)
+            }
+        });
         Ok(Update::from_node(&self.name, text, status))
     }
 }
@@ -181,14 +184,26 @@ impl Node for ScriptNode {
     /// `{<var>}`. Interpolated values are shell-escaped (single-quoted, see
     /// [`render_shell`]) so a node output containing shell metacharacters is
     /// treated as literal text rather than injected as commands.
+    ///
+    /// A launch/timeout/cancellation error is reported as `Status::Failed`
+    /// (uniform with [`ToolNode`]); the executor's post-node cancellation check
+    /// still stops the run promptly on Ctrl-C.
     async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
         let script = render_shell(&self.script, state);
-        let result = run_script(&script, None, &cx.cancel).await?;
-        let status = if result.code == Some(0) {
-            Status::Ok
-        } else {
-            Status::Failed
-        };
-        Ok(Update::from_node(&self.name, result.output, status))
+        match run_script(&script, None, &cx.cancel).await {
+            Ok(result) => {
+                let status = if result.code == Some(0) {
+                    Status::Ok
+                } else {
+                    Status::Failed
+                };
+                Ok(Update::from_node(&self.name, result.output, status))
+            }
+            Err(e) => Ok(Update::from_node(
+                &self.name,
+                format!("error: {e}"),
+                Status::Failed,
+            )),
+        }
     }
 }

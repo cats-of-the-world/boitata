@@ -276,6 +276,14 @@ impl Executor {
         task: String,
         cancel: CancellationToken,
     ) -> anyhow::Result<State> {
+        // A zero step budget can't run anything; report it as the configuration
+        // error it is rather than a misleading "step limit exceeded".
+        if self.max_steps == 0 {
+            return Err(
+                BlueprintError::Invalid("max_steps must be greater than 0".to_string()).into(),
+            );
+        }
+
         info!("Starting blueprint `{}` on task: {task}", graph.name);
         self.emit(AuditEvent::BlueprintStarted {
             blueprint: graph.name.clone(),
@@ -325,8 +333,12 @@ impl Executor {
                     return Err(e.context(format!("blueprint node `{current}` failed")));
                 }
             };
+            // Record the status this node reported, before merging, so the audit
+            // event reflects the node itself rather than depending on the `status`
+            // channel's reducer staying last-write.
+            let node_status = update.status;
             state.apply(update);
-            let status = match state.status {
+            let status = match node_status {
                 Some(Status::Failed) => NodeStatus::Failed,
                 _ => NodeStatus::Ok,
             };
@@ -548,6 +560,28 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("step limit"));
         assert_eq!(runs.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn zero_max_steps_is_a_config_error() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let graph = Graph::builder("g", "a")
+            .node(CountingNode {
+                name: "a".into(),
+                status: Status::Ok,
+                runs: runs.clone(),
+            })
+            .edge("a", END)
+            .build()
+            .unwrap();
+
+        let err = executor()
+            .with_max_steps(0)
+            .run(&graph, "task".into())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("max_steps must be greater than 0"));
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "no node should run");
     }
 
     #[tokio::test]
