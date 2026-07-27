@@ -264,12 +264,7 @@ async fn run_blueprint(
     audit: Option<Arc<audit::FileAuditLog>>,
     policy: ToolPolicy,
 ) -> anyhow::Result<()> {
-    let graph = blueprint::by_name(name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unknown blueprint `{name}` (known: {})",
-            blueprint::KNOWN.join(", ")
-        )
-    })?;
+    let graph = blueprint::load(name)?;
 
     let mut executor = blueprint::Executor::new(provider, tools)
         .with_policy(policy)

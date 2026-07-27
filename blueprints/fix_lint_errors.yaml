@@ -1,0 +1,23 @@
+# Drive the codebase to a clean clippy run: the agent fixes warnings, formatting
+# is applied, then clippy verifies with warnings denied. A failing verify loops
+# back to the agent until clippy is clean (or the step limit is hit).
+name: fix_lint_errors
+entry: fix
+nodes:
+  fix:
+    type: agent
+    prompt: |
+      Fix all clippy warnings in this Rust project. Run `cargo clippy` to see
+      them, then edit the code to resolve every warning without changing
+      behavior. Task context: {task}
+  fmt:
+    type: tool
+    tool: cargo_fmt
+  verify:
+    type: script
+    run: "cargo clippy --all-targets --all-features -- -D warnings"
+edges:
+  - {from: fix, to: fmt}
+  - {from: fmt, to: verify}
+  - {from: verify, when: failure, to: fix}
+  - {from: verify, when: success, to: END}
