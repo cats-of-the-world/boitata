@@ -1,5 +1,5 @@
 // Built-in blueprints, defined in code and selected by name via `--blueprint`.
-// A YAML loader and a fuller library are a later phase (see docs/blueprint.md).
+// A YAML loader and a fuller library are a later addition.
 
 use serde_json::json;
 
