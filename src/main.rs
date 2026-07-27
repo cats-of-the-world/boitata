@@ -286,8 +286,9 @@ async fn run_blueprint(
     info!("Running blueprint `{name}` on task: {task}");
     let state = executor.run(&graph, task).await?;
 
-    // Write the transcript directly, ignoring write errors: a broken pipe (output
-    // piped into a command that exits early) must not panic the process.
+    // Write the transcript and result directly, ignoring write errors: a broken
+    // pipe (output piped into a command that exits early) must not panic the
+    // process. `println!` would panic on that, so use `writeln!`.
     {
         use std::io::Write;
         let mut out = std::io::stdout().lock();
@@ -295,12 +296,12 @@ async fn run_blueprint(
         for (node, text) in state.transcript() {
             let _ = writeln!(out, "[{node}]\n{text}\n");
         }
+        if matches!(state.status, Some(blueprint::Status::Ok)) {
+            let _ = writeln!(out, "Blueprint `{name}` completed.");
+        }
     }
     match state.status {
-        Some(blueprint::Status::Ok) => {
-            println!("Blueprint `{name}` completed.");
-            Ok(())
-        }
+        Some(blueprint::Status::Ok) => Ok(()),
         Some(blueprint::Status::Failed) => {
             bail!("Blueprint `{name}` finished with a failing step");
         }

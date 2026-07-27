@@ -245,9 +245,27 @@ impl Executor {
         self
     }
 
-    fn emit(&self, event: AuditEvent) {
+    /// Emit an audit event, building it lazily so no event (and its string
+    /// allocations) is constructed when no sink is attached.
+    fn emit(&self, event: impl FnOnce() -> AuditEvent) {
         if let Some(audit) = &self.audit {
-            audit.record(event);
+            audit.record(event());
+        }
+    }
+
+    /// Build the per-run node context that borrows this executor's shared
+    /// resources and agent-node configuration. Centralized so adding a field to
+    /// both `Executor` and `NodeCtx` has a single mapping site.
+    fn node_ctx(&self, cancel: CancellationToken) -> NodeCtx<'_> {
+        NodeCtx {
+            provider: self.provider.clone(),
+            tools: &self.tools,
+            audit: self.audit.clone(),
+            policy: &self.policy,
+            system_prompt: self.system_prompt.as_deref(),
+            max_iterations: self.max_iterations,
+            compact_threshold: self.compact_threshold,
+            cancel,
         }
     }
 
@@ -285,22 +303,13 @@ impl Executor {
         }
 
         info!("Starting blueprint `{}` on task: {task}", graph.name);
-        self.emit(AuditEvent::BlueprintStarted {
+        self.emit(|| AuditEvent::BlueprintStarted {
             blueprint: graph.name.clone(),
             entry: graph.entry.clone(),
         });
 
         let mut state = State::new(task);
-        let cx = NodeCtx {
-            provider: self.provider.clone(),
-            tools: &self.tools,
-            audit: self.audit.clone(),
-            policy: &self.policy,
-            system_prompt: self.system_prompt.as_deref(),
-            max_iterations: self.max_iterations,
-            compact_threshold: self.compact_threshold,
-            cancel: cancel.clone(),
-        };
+        let cx = self.node_ctx(cancel.clone());
 
         // `steps` in the completion events is the number of nodes executed. The
         // normal path reaches END at the top of iteration `step` having run `step`
@@ -309,7 +318,7 @@ impl Executor {
         let mut current = graph.entry.clone();
         for step in 0..self.max_steps {
             if current == END {
-                self.emit(AuditEvent::BlueprintCompleted {
+                self.emit(|| AuditEvent::BlueprintCompleted {
                     steps: step,
                     reason: CompletionReason::Completed,
                 });
@@ -326,7 +335,7 @@ impl Executor {
             let update = match node.run(&state, &cx).await {
                 Ok(update) => update,
                 Err(e) => {
-                    self.emit(AuditEvent::BlueprintCompleted {
+                    self.emit(|| AuditEvent::BlueprintCompleted {
                         steps: step + 1,
                         reason: CompletionReason::Error,
                     });
@@ -346,7 +355,7 @@ impl Executor {
             // Stop if cancelled while the node was running.
             if cancel.is_cancelled() {
                 warn!("Blueprint cancelled at node `{current}`");
-                self.emit(AuditEvent::BlueprintCompleted {
+                self.emit(|| AuditEvent::BlueprintCompleted {
                     steps: step + 1,
                     reason: CompletionReason::Cancelled,
                 });
@@ -356,14 +365,23 @@ impl Executor {
             let next = match Self::route(graph, &current, &state) {
                 Ok(next) => next,
                 Err(e) => {
-                    self.emit(AuditEvent::BlueprintCompleted {
+                    // The node did run; record it (with no successor) before the
+                    // terminal event so the audit trail isn't missing this step.
+                    self.emit(|| AuditEvent::NodeExecuted {
+                        step: step + 1,
+                        node: current.clone(),
+                        kind,
+                        status,
+                        next: String::new(),
+                    });
+                    self.emit(|| AuditEvent::BlueprintCompleted {
                         steps: step + 1,
                         reason: CompletionReason::Error,
                     });
                     return Err(e.context(format!("routing after node `{current}`")));
                 }
             };
-            self.emit(AuditEvent::NodeExecuted {
+            self.emit(|| AuditEvent::NodeExecuted {
                 step: step + 1,
                 node: current.clone(),
                 kind,
@@ -377,7 +395,7 @@ impl Executor {
             "Blueprint `{}` hit the step limit ({})",
             graph.name, self.max_steps
         );
-        self.emit(AuditEvent::BlueprintCompleted {
+        self.emit(|| AuditEvent::BlueprintCompleted {
             steps: self.max_steps,
             reason: CompletionReason::StepLimit,
         });
