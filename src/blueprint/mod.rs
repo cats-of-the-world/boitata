@@ -1,10 +1,34 @@
-// Blueprint: a graph of nodes (agents, tools, or scripts) executed over a typed
-// state, with static and conditional edges and cycles. This is the hybrid
-// deterministic/agentic workflow engine (Sprint 4); see docs/blueprint.md.
+// Blueprint: a hybrid deterministic/agentic workflow engine. A blueprint is a
+// graph of nodes run over a typed state, from an entry node until END, with
+// static and conditional edges and cycles. The design follows LangGraph, adapted
+// so a node can be an agent, a tool, or a script.
+//
+// State (see `state.rs`): named channels, each with a reducer. A node never
+// mutates the state; it reads the current state and returns an `Update` (a set of
+// channel writes) that the executor merges through each channel's reducer:
+//   - messages: transcript of node outputs (reducer: append)
+//   - task:     the original task string       (reducer: set-once)
+//   - status:   the last node's outcome         (reducer: last-write)
+//   - vars:     values nodes emit for routing and `{task}`/`{var}` templating
+//               (reducer: merge)
+//
+// Nodes (see `nodes.rs`), three kinds:
+//   - agent:  runs the LLM agent loop (`Agent`) on a prompt
+//   - tool:   invokes a named tool from the `ToolRegistry`
+//   - script: runs a shell script (reusing the exec infrastructure), routing on
+//             its exit code
+//
+// Edges: `Static(from -> to)` or `Conditional(from -> router(state) -> next)`,
+// where a target may be the `END` sentinel. A node with no outgoing edge ends the
+// run.
 //
 // The executor is sequential: one node runs per step, its update is merged into
-// the state, then routing picks the next node, until END or a step limit. It
-// reuses the agent loop, the tool registry, and the shell-exec infrastructure.
+// the state, then routing picks the next node, until END or a step limit
+// (`max_steps`, which bounds cyclic graphs). Ctrl-C cancels the run, and each
+// step emits audit events (see `crate::audit`).
+//
+// Blueprints are currently defined in code (see `library.rs`); a YAML loader is a
+// later addition.
 
 mod library;
 mod nodes;
