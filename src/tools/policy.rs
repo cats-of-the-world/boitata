@@ -44,7 +44,7 @@ pub enum Decision {
 }
 
 /// Decides whether a given tool call may run.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ToolPolicy {
     mode: PolicyMode,
     /// Regexes; an `execute_command` whose command matches any is denied.

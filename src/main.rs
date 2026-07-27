@@ -4,6 +4,7 @@
 // Declare modules
 mod agent;
 mod audit;
+mod blueprint;
 mod config;
 mod context;
 mod mcp;
@@ -108,12 +109,8 @@ async fn main() -> anyhow::Result<()> {
 async fn run_task(
     task: String,
     config_path: Option<String>,
-    blueprint: Option<String>,
+    blueprint_name: Option<String>,
 ) -> anyhow::Result<()> {
-    if let Some(bp) = blueprint {
-        info!("Ignoring blueprint (not yet implemented): {}", bp);
-    }
-
     let path = Config::resolve_path(config_path);
     let config = Config::load(&path)?;
     info!(
@@ -152,6 +149,7 @@ async fn run_task(
     let workspace_root = if config.confine_tools.unwrap_or(true) {
         let root = config
             .workspace_root
+            .clone()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -203,7 +201,21 @@ async fn run_task(
         }
     }
 
-    let mut agent = Agent::new(provider, tools);
+    // Build the tool permission policy from config. A bad denylist regex is a
+    // config error we fail on rather than silently dropping a security control.
+    let policy = ToolPolicy::new(
+        config.tool_policy.unwrap_or_default(),
+        &config.denied_commands,
+    )
+    .context("invalid `denied_commands` regex in config")?;
+
+    // A blueprint runs a graph of agent/tool/script nodes; without one we run the
+    // single-agent path (equivalent to a one-node agent blueprint).
+    if let Some(name) = blueprint_name {
+        return run_blueprint(&name, task, &config, provider, tools, audit, policy).await;
+    }
+
+    let mut agent = Agent::new(provider, tools).with_policy(policy);
     if let Some(audit) = audit {
         agent = agent.with_audit(audit);
     }
@@ -216,15 +228,6 @@ async fn run_task(
     if let Some(threshold) = config.auto_compact_threshold {
         agent = agent.with_compact_threshold(threshold);
     }
-
-    // Build the tool permission policy from config. A bad denylist regex is a
-    // config error we fail on rather than silently dropping a security control.
-    let policy = ToolPolicy::new(
-        config.tool_policy.unwrap_or_default(),
-        &config.denied_commands,
-    )
-    .context("invalid `denied_commands` regex in config")?;
-    agent = agent.with_policy(policy);
 
     info!("Running task: {}", task);
     let result = agent.run(Task::new(task)).await?;
@@ -248,6 +251,62 @@ async fn run_task(
     }
 
     Ok(())
+}
+
+/// Run a named blueprint. Agent nodes inherit the same provider, tools, policy,
+/// and agent settings the single-agent path uses.
+async fn run_blueprint(
+    name: &str,
+    task: String,
+    config: &Config,
+    provider: Arc<dyn Provider>,
+    tools: ToolRegistry,
+    audit: Option<Arc<audit::FileAuditLog>>,
+    policy: ToolPolicy,
+) -> anyhow::Result<()> {
+    let graph = blueprint::by_name(name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown blueprint `{name}` (known: {})",
+            blueprint::KNOWN.join(", ")
+        )
+    })?;
+
+    let mut executor = blueprint::Executor::new(provider, tools)
+        .with_policy(policy)
+        .with_system_prompt(config.system_prompt.clone())
+        .with_max_iterations(config.max_iterations)
+        .with_compact_threshold(config.auto_compact_threshold);
+    if let Some(audit) = audit {
+        executor = executor.with_audit(audit);
+    }
+    if let Some(max_steps) = config.blueprint_max_steps {
+        executor = executor.with_max_steps(max_steps);
+    }
+
+    info!("Running blueprint `{name}` on task: {task}");
+    let state = executor.run(&graph, task).await?;
+
+    // Write the transcript and result directly, ignoring write errors: a broken
+    // pipe (output piped into a command that exits early) must not panic the
+    // process. `println!` would panic on that, so use `writeln!`.
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "---");
+        for (node, text) in state.transcript() {
+            let _ = writeln!(out, "[{node}]\n{text}\n");
+        }
+        if matches!(state.status, Some(blueprint::Status::Ok)) {
+            let _ = writeln!(out, "Blueprint `{name}` completed.");
+        }
+    }
+    match state.status {
+        Some(blueprint::Status::Ok) => Ok(()),
+        Some(blueprint::Status::Failed) => {
+            bail!("Blueprint `{name}` finished with a failing step");
+        }
+        None => bail!("Blueprint `{name}` finished with no node having run"),
+    }
 }
 
 /// Connect to one MCP server and register its tools into `tools`. Returns the

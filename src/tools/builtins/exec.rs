@@ -402,7 +402,12 @@ pub(super) async fn run(
     cancel: &CancellationToken,
 ) -> Result<ToolOutput> {
     let output = run_raw(program, args, cwd, timeout, cancel).await?;
+    Ok(ToolOutput::text(format_output(&output)))
+}
 
+/// Format a raw run into the single-string form the command tools present: an
+/// exit-status note (only when non-zero), then stdout, then stderr.
+fn format_output(output: &Output) -> String {
     let mut sections = Vec::new();
     match output.code {
         Some(0) => {}
@@ -418,11 +423,40 @@ pub(super) async fn run(
         sections.push(format!("--- stderr ---\n{stderr}"));
     }
     if sections.is_empty() {
-        return Ok(ToolOutput::text(
-            "(command completed successfully with no output)",
-        ));
+        return "(command completed successfully with no output)".to_string();
     }
-    Ok(ToolOutput::text(sections.join("\n")))
+    sections.join("\n")
+}
+
+/// Result of a script run: the process exit code (`None` if killed by a signal)
+/// and the combined output text (formatted like the command tools).
+#[derive(Debug)]
+pub struct ScriptResult {
+    pub code: Option<i32>,
+    pub output: String,
+}
+
+/// Run a shell script string via `sh -c`, for blueprint script nodes. Same
+/// timeout, output capture, and process-group kill behavior as the
+/// `execute_command` tool, but returns the exit code so callers can route on
+/// success/failure. `Err` only on launch failure, timeout, or cancellation.
+pub async fn run_script(
+    script: &str,
+    cwd: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<ScriptResult> {
+    let output = run_raw(
+        "sh",
+        vec!["-c".to_string(), script.to_string()],
+        cwd,
+        DEFAULT_TIMEOUT,
+        cancel,
+    )
+    .await?;
+    Ok(ScriptResult {
+        code: output.code,
+        output: format_output(&output),
+    })
 }
 
 // --- argument helpers -------------------------------------------------------

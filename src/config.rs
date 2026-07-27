@@ -72,6 +72,10 @@ pub struct Config {
     /// compaction.
     #[serde(default)]
     pub auto_compact_threshold: Option<f32>,
+    /// Cap on how many nodes a blueprint run may execute (bounds cyclic graphs).
+    /// Only used with `--blueprint`; defaults to the executor's built-in limit.
+    #[serde(default)]
+    pub blueprint_max_steps: Option<usize>,
 }
 
 /// A single MCP server. The transport is inferred from which field is set:
@@ -329,6 +333,7 @@ mod tests {
             tool_policy: None,
             denied_commands: Vec::new(),
             auto_compact_threshold: None,
+            blueprint_max_steps: None,
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("super-secret-key"), "{rendered}");

@@ -91,6 +91,56 @@ pub enum AuditEvent {
         total_input_tokens: usize,
         total_output_tokens: usize,
     },
+    /// A blueprint run began.
+    BlueprintStarted { blueprint: String, entry: String },
+    /// A blueprint node ran and routing chose the next node.
+    NodeExecuted {
+        step: usize,
+        node: String,
+        kind: NodeKind,
+        /// State status after the node ran.
+        status: NodeStatus,
+        /// The next node the run moves to (or the END sentinel).
+        next: String,
+    },
+    /// A blueprint run finished.
+    BlueprintCompleted {
+        steps: usize,
+        reason: CompletionReason,
+    },
+}
+
+/// Which kind of blueprint node ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeKind {
+    Agent,
+    Tool,
+    Script,
+}
+
+/// Outcome of a blueprint node.
+///
+/// This mirrors `blueprint::state::Status` but is a distinct type on purpose:
+/// `audit` is a lower-level module that must not depend on `blueprint` (the
+/// dependency runs the other way). The executor maps `Status` to `NodeStatus` at
+/// the audit boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeStatus {
+    Ok,
+    Failed,
+}
+
+/// Why a blueprint run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionReason {
+    Completed,
+    Cancelled,
+    StepLimit,
+    /// A node or routing step returned an error.
+    Error,
 }
 
 /// An [`AuditSink`] that appends JSON lines to a file.
@@ -157,6 +207,28 @@ mod tests {
         assert!(json.contains(r#""event":"run_started""#));
         assert!(json.contains(r#""run_id":"run-1""#));
         assert!(json.contains(r#""provider":"openai""#));
+    }
+
+    #[test]
+    fn blueprint_event_enums_serialize_snake_case() {
+        let json = serde_json::to_string(&AuditEvent::NodeExecuted {
+            step: 1,
+            node: "main".to_string(),
+            kind: NodeKind::Agent,
+            status: NodeStatus::Ok,
+            next: "fmt".to_string(),
+        })
+        .unwrap();
+        assert!(json.contains(r#""event":"node_executed""#));
+        assert!(json.contains(r#""kind":"agent""#));
+        assert!(json.contains(r#""status":"ok""#));
+
+        let done = serde_json::to_string(&AuditEvent::BlueprintCompleted {
+            steps: 3,
+            reason: CompletionReason::StepLimit,
+        })
+        .unwrap();
+        assert!(done.contains(r#""reason":"step_limit""#));
     }
 
     #[test]
