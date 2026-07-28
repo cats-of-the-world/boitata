@@ -1,0 +1,19 @@
+# Drive the test suite to green: the agent investigates and fixes failing tests,
+# then `cargo test` verifies. A failing run loops back to the agent until the
+# suite passes (or the step limit is hit).
+name: fix_test_failure
+entry: fix
+nodes:
+  fix:
+    type: agent
+    prompt: |
+      The test suite is failing. Run `cargo test` to see the failures, find the
+      root cause, and fix the code (not the tests, unless a test is genuinely
+      wrong) so the whole suite passes. Task context: {task}
+  verify:
+    type: script
+    run: "cargo test"
+edges:
+  - {from: fix, to: verify}
+  - {from: verify, when: failure, to: fix}
+  - {from: verify, when: success, to: END}

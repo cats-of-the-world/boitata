@@ -27,14 +27,16 @@
 // (`max_steps`, which bounds cyclic graphs). Ctrl-C cancels the run, and each
 // step emits audit events (see `crate::audit`).
 //
-// Blueprints are currently defined in code (see `library.rs`); a YAML loader is a
-// later addition.
+// Blueprints are defined in YAML (see `yaml.rs`). A small starter library ships
+// embedded in the binary, and `--blueprint` also accepts a path to a user's own
+// YAML file (see `library.rs`).
 
 mod library;
 mod nodes;
 mod state;
+mod yaml;
 
-pub use library::{KNOWN, by_name};
+pub use library::load;
 pub use state::{State, Status};
 
 use nodes::{Node, NodeCtx};
@@ -84,6 +86,27 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// Test helper: the node `route` picks after `current`, given `status` as the
+    /// last node's outcome. Lets the YAML loader's tests assert routing without
+    /// running nodes.
+    #[cfg(test)]
+    pub(crate) fn route_with_status_for_test(
+        &self,
+        current: &str,
+        status: Option<Status>,
+    ) -> String {
+        let mut state = State::new(String::new());
+        state.status = status;
+        Executor::route(self, current, &state).unwrap()
+    }
+
+    /// Test helper: routing after `current` with no prior status (treated as
+    /// success by conditional routers).
+    #[cfg(test)]
+    pub(crate) fn route_for_test(&self, current: &str) -> String {
+        self.route_with_status_for_test(current, None)
+    }
+
     pub fn builder(name: impl Into<String>, entry: impl Into<String>) -> GraphBuilder {
         GraphBuilder {
             name: name.into(),

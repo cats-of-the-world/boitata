@@ -1,0 +1,23 @@
+# The default blueprint, exercising all three node kinds: the agent does the
+# task, `cargo fmt` runs before finishing, and `cargo check` verifies; a failing
+# check loops back to the agent.
+#
+#   main (agent) -> fmt (tool) -> verify (script)
+#   verify failed -> main;  verify ok -> END
+name: default
+entry: main
+nodes:
+  main:
+    type: agent
+    prompt: "{task}"
+  fmt:
+    type: tool
+    tool: cargo_fmt
+  verify:
+    type: script
+    run: "cargo check"
+edges:
+  - {from: main, to: fmt}
+  - {from: fmt, to: verify}
+  - {from: verify, when: failure, to: main}
+  - {from: verify, when: success, to: END}

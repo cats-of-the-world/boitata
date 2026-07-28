@@ -218,6 +218,23 @@ impl ToolRegistry {
         tool.execute(arguments.clone(), cancel).await
     }
 
+    /// Return a new registry holding only the named tools, sharing the same
+    /// underlying tool instances. Errors (with [`ToolError::NotFound`]) if any
+    /// name is not registered, so a blueprint that scopes an agent to a
+    /// misspelled tool fails loudly rather than silently dropping it.
+    pub fn subset(&self, names: &[impl AsRef<str>]) -> Result<ToolRegistry> {
+        let mut tools = HashMap::with_capacity(names.len());
+        for name in names {
+            let name = name.as_ref();
+            let tool = self
+                .tools
+                .get(name)
+                .ok_or_else(|| ToolError::NotFound(name.to_string()))?;
+            tools.insert(name.to_string(), tool.clone());
+        }
+        Ok(ToolRegistry { tools })
+    }
+
     /// Look up a registered tool's side-effect annotations, if it exists.
     pub fn annotations(&self, name: &str) -> Option<ToolAnnotations> {
         self.tools.get(name).map(|tool| tool.annotations())

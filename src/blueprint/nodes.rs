@@ -48,6 +48,8 @@ pub trait Node: Send + Sync {
 pub struct AgentNode {
     name: String,
     prompt: String,
+    /// Tool names this agent is restricted to; `None` means the full registry.
+    tools: Option<Vec<String>>,
 }
 
 impl AgentNode {
@@ -55,7 +57,15 @@ impl AgentNode {
         Self {
             name: name.into(),
             prompt: prompt.into(),
+            tools: None,
         }
+    }
+
+    /// Restrict this agent to a subset of the registry's tools (the schema's
+    /// per-node `tools:` list). Unknown names are rejected when the node runs.
+    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
+        self.tools = Some(tools);
+        self
     }
 }
 
@@ -72,8 +82,16 @@ impl Node for AgentNode {
     async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
         let prompt = render(&self.prompt, state);
 
-        let mut agent =
-            Agent::new(cx.provider.clone(), cx.tools.clone()).with_policy(cx.policy.clone());
+        // Scope the agent to its declared tools, if any; otherwise use the full
+        // registry. An unknown tool name is a blueprint error surfaced here.
+        let tools = match &self.tools {
+            Some(names) => cx.tools.subset(names).map_err(|e| {
+                anyhow::anyhow!("agent node `{}` lists an unknown tool: {e}", self.name)
+            })?,
+            None => cx.tools.clone(),
+        };
+
+        let mut agent = Agent::new(cx.provider.clone(), tools).with_policy(cx.policy.clone());
         if let Some(system) = cx.system_prompt {
             agent = agent.with_system_prompt(system.to_string());
         }

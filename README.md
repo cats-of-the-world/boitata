@@ -353,9 +353,9 @@ the tool total reported at startup and, like tool calls, appear in the audit log
 - [x] Resource access for context gathering
 
 ### Sprint 4: Blueprint System
-- [ ] Hybrid deterministic/agentic workflows
-- [ ] Common blueprints (fix_lint_errors, fix_test_failure, etc.)
-- [ ] YAML blueprint definitions
+- [x] Hybrid deterministic/agentic workflows (agent/tool/script node graphs)
+- [x] YAML blueprint definitions (`--blueprint <name>` or a path to your own `.yaml`)
+- [x] Starter blueprints (`default`, `fix_lint_errors`, `fix_test_failure`, `setup_devbox`)
 
 ### Sprint 5: Workspace Management
 - [ ] Workspace manager with isolation

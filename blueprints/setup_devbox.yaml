@@ -1,0 +1,16 @@
+# Provision a reproducible environment before working: initialize and install a
+# devbox, then hand the task to the agent. The setup step runs deterministically
+# as a script; a failed setup ends the run before any agent work begins.
+name: setup_devbox
+entry: devbox
+nodes:
+  devbox:
+    type: script
+    run: "devbox init && devbox install"
+  work:
+    type: agent
+    prompt: "{task}"
+edges:
+  - {from: devbox, when: failure, to: END}
+  - {from: devbox, when: success, to: work}
+  - {from: work, to: END}
