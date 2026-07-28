@@ -125,6 +125,7 @@ pub enum NodeKind {
     Agent,
     Tool,
     Script,
+    Human,
 }
 
 /// Outcome of a blueprint node.
@@ -230,6 +231,10 @@ mod tests {
         assert!(json.contains(r#""event":"node_executed""#));
         assert!(json.contains(r#""kind":"agent""#));
         assert!(json.contains(r#""status":"ok""#));
+
+        // The human node kind serializes to the snake_case tag too.
+        let human = serde_json::to_string(&NodeKind::Human).unwrap();
+        assert_eq!(human, r#""human""#);
 
         let done = serde_json::to_string(&AuditEvent::BlueprintCompleted {
             steps: 3,

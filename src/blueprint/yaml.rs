@@ -26,7 +26,7 @@ use anyhow::{Context, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::nodes::{AgentNode, ScriptNode, ToolNode};
+use super::nodes::{AgentNode, HumanMode, HumanNode, ScriptNode, ToolNode};
 use super::state::Status;
 use super::{END, Graph, GraphBuilder};
 
@@ -61,6 +61,12 @@ enum NodeDef {
     },
     /// Run a shell script deterministically, routing on its exit code.
     Script { run: String },
+    /// Pause for human input (human-in-the-loop). `mode` defaults to `input`.
+    Human {
+        prompt: String,
+        #[serde(default)]
+        mode: HumanMode,
+    },
 }
 
 /// Tool args default to an empty object rather than `null`, since tools expect
@@ -113,6 +119,7 @@ fn add_node(builder: GraphBuilder, name: String, node: NodeDef) -> GraphBuilder 
         }
         NodeDef::Tool { tool, args } => builder.node(ToolNode::new(name, tool, args)),
         NodeDef::Script { run } => builder.node(ScriptNode::new(name, run)),
+        NodeDef::Human { prompt, mode } => builder.node(HumanNode::new(name, prompt, mode)),
     }
 }
 

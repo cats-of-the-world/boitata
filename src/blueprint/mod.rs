@@ -1,7 +1,7 @@
 // Blueprint: a hybrid deterministic/agentic workflow engine. A blueprint is a
 // graph of nodes run over a typed state, from an entry node until END, with
 // static and conditional edges and cycles. The design follows LangGraph, adapted
-// so a node can be an agent, a tool, or a script.
+// so a node can be an agent, a tool, a script, or a human-input prompt.
 //
 // State (see `state.rs`): named channels, each with a reducer. A node never
 // mutates the state; it reads the current state and returns an `Update` (a set of
@@ -17,6 +17,7 @@
 //   - tool:   invokes a named tool from the `ToolRegistry`
 //   - script: runs a shell script (reusing the exec infrastructure), routing on
 //             its exit code
+//   - human:  pauses for operator input (human-in-the-loop)
 //
 // Edges: `Static(from -> [to, ...])` or `Conditional(from -> router(state) ->
 // [next, ...])`. A source may fan out to several successors; a target may be the
@@ -35,11 +36,13 @@
 // embedded in the binary, and `--blueprint` also accepts a path to a user's own
 // YAML file (see `library.rs`).
 
+mod human;
 mod library;
 mod nodes;
 mod state;
 mod yaml;
 
+pub use human::{HumanInterface, StdioHuman};
 pub use library::load;
 pub use state::{State, Status};
 
@@ -286,6 +289,8 @@ pub struct Executor {
     /// How many times to retry a super-step that fails with a hard error before
     /// giving up. `0` (the default) means no retries.
     max_retries: usize,
+    /// How `human` nodes collect operator input. Defaults to [`StdioHuman`].
+    human: Arc<dyn HumanInterface>,
 }
 
 impl Executor {
@@ -300,6 +305,7 @@ impl Executor {
             compact_threshold: None,
             max_steps: DEFAULT_MAX_STEPS,
             max_retries: 0,
+            human: Arc::new(StdioHuman),
         }
     }
 
@@ -343,6 +349,13 @@ impl Executor {
         self
     }
 
+    /// Override how `human` nodes collect input (the default is [`StdioHuman`]).
+    /// Used to inject a scripted responder in tests.
+    pub fn with_human(mut self, human: Arc<dyn HumanInterface>) -> Self {
+        self.human = human;
+        self
+    }
+
     /// Emit an audit event, building it lazily so no event (and its string
     /// allocations) is constructed when no sink is attached.
     fn emit(&self, event: impl FnOnce() -> AuditEvent) {
@@ -363,6 +376,7 @@ impl Executor {
             system_prompt: self.system_prompt.as_deref(),
             max_iterations: self.max_iterations,
             compact_threshold: self.compact_threshold,
+            human: self.human.clone(),
             cancel,
         }
     }
@@ -1009,5 +1023,109 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("flaky"), "{err}");
         assert_eq!(runs.load(Ordering::SeqCst), 3, "initial try + 2 retries");
+    }
+
+    // A [`HumanInterface`] that replays queued replies, erroring when exhausted
+    // (standing in for a non-interactive stdin at EOF).
+    struct ScriptedHuman {
+        replies: std::sync::Mutex<std::collections::VecDeque<String>>,
+    }
+    impl ScriptedHuman {
+        fn new(replies: &[&str]) -> Arc<Self> {
+            Arc::new(Self {
+                replies: std::sync::Mutex::new(replies.iter().map(|s| s.to_string()).collect()),
+            })
+        }
+    }
+    #[async_trait]
+    impl HumanInterface for ScriptedHuman {
+        async fn prompt(
+            &self,
+            _prompt: &str,
+            _cancel: &CancellationToken,
+        ) -> anyhow::Result<String> {
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("no scripted reply (stdin EOF)"))
+        }
+    }
+
+    /// approve (human) -> work on approval, END on decline.
+    fn approval_graph() -> Graph {
+        use super::nodes::{HumanMode, HumanNode, ScriptNode};
+        Graph::builder("h", "approve")
+            .node(HumanNode::new(
+                "approve",
+                "proceed? {task}",
+                HumanMode::Approval,
+            ))
+            .node(ScriptNode::new("work", "echo working"))
+            .conditional("approve", |s| match s.status {
+                Some(Status::Failed) => vec![END.to_string()],
+                _ => vec!["work".to_string()],
+            })
+            .edge("work", END)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn human_approval_yes_proceeds() {
+        let state = executor()
+            .with_human(ScriptedHuman::new(&["yes"]))
+            .run(&approval_graph(), "do it".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            state.vars.get("approve").map(String::as_str),
+            Some("approved")
+        );
+        assert!(state.vars.contains_key("work"), "work should have run");
+    }
+
+    #[tokio::test]
+    async fn human_approval_no_aborts() {
+        let state = executor()
+            .with_human(ScriptedHuman::new(&["n"]))
+            .run(&approval_graph(), "do it".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            state.vars.get("approve").map(String::as_str),
+            Some("declined")
+        );
+        assert!(!state.vars.contains_key("work"), "work must be skipped");
+        assert_eq!(state.status, Some(Status::Failed));
+    }
+
+    #[tokio::test]
+    async fn human_input_captures_reply() {
+        use super::nodes::{HumanMode, HumanNode};
+        let graph = Graph::builder("h", "ask")
+            .node(HumanNode::new("ask", "your name?", HumanMode::Input))
+            .edge("ask", END)
+            .build()
+            .unwrap();
+        let state = executor()
+            .with_human(ScriptedHuman::new(&["Ada"]))
+            .run(&graph, "t".into())
+            .await
+            .unwrap();
+        assert_eq!(state.vars.get("ask").map(String::as_str), Some("Ada"));
+        assert_eq!(state.status, Some(Status::Ok));
+    }
+
+    #[tokio::test]
+    async fn human_input_unavailable_is_a_hard_error() {
+        // No scripted reply → the interface errors (as a non-interactive stdin
+        // would), which is a hard error that fails the run rather than a decline.
+        let err = executor()
+            .with_human(ScriptedHuman::new(&[]))
+            .run(&approval_graph(), "t".into())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("approve"), "{err}");
     }
 }

@@ -1,0 +1,18 @@
+# Human-in-the-loop: gate the work behind an operator approval. The `approve`
+# node prompts for a yes/no; an affirmative reply routes to the agent, anything
+# else ends the run. Requires an interactive stdin — on a non-interactive run the
+# approval node errors rather than proceeding unattended.
+name: human_approval
+entry: approve
+nodes:
+  approve:
+    type: human
+    mode: approval
+    prompt: "About to run this task:\n  {task}\nProceed? [y/N]"
+  work:
+    type: agent
+    prompt: "{task}"
+edges:
+  - {from: approve, when: success, to: work}
+  - {from: approve, when: failure, to: END}
+  - {from: work, to: END}
