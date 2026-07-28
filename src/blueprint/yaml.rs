@@ -135,8 +135,22 @@ fn add_edges(
 
     for from in order {
         let group = by_from.remove(&from).expect("from was recorded in order");
-        let conditional = group.iter().any(|e| e.when.is_some());
-        if conditional {
+
+        // Validate the group's *structure* before any per-edge target check, so
+        // the most actionable error wins regardless of edge order: an unknown
+        // source, then a conditional/unconditional mix, come first.
+        if !known.contains(&from) {
+            bail!("edge source `{from}` is not a node");
+        }
+        let has_conditional = group.iter().any(|e| e.when.is_some());
+        let has_unconditional = group.iter().any(|e| e.when.is_none());
+        if has_conditional && has_unconditional {
+            bail!(
+                "node `{from}` mixes conditional (`when`) and unconditional edges; make them all conditional"
+            );
+        }
+
+        if has_conditional {
             builder = add_conditional(builder, &from, group, known)?;
         } else {
             // No `when`: exactly one unconditional edge is allowed.
@@ -163,11 +177,11 @@ fn add_conditional(
     let mut on_success: Option<String> = None;
     let mut on_failure: Option<String> = None;
     for edge in group {
-        let Some(when) = edge.when.as_deref() else {
-            bail!(
-                "node `{from}` mixes conditional (`when`) and unconditional edges; make them all conditional"
-            );
-        };
+        // `add_edges` rejects mixed groups, so every edge here carries a `when`.
+        let when = edge
+            .when
+            .as_deref()
+            .expect("add_edges routes only all-conditional groups here");
         let target = normalize_target(&edge.to);
         // `build` only checks static edge targets; conditional ones are checked
         // here so a typo fails at load time rather than mid-run.
@@ -319,6 +333,39 @@ edges:
 "#;
         let err = from_yaml(src).err().unwrap().to_string();
         assert!(err.contains("multiple unconditional edges"), "{err}");
+    }
+
+    #[test]
+    fn mixing_error_wins_over_edge_order() {
+        // A group that mixes a conditional edge (with a bad target, listed first)
+        // and an unconditional edge must report the structural mixing error, not
+        // the unknown-target error — regardless of edge order.
+        let src = r#"
+name: t
+entry: a
+nodes:
+  a: {type: script, run: "true"}
+  b: {type: script, run: "true"}
+edges:
+  - {from: a, when: failure, to: nowhere}
+  - {from: a, to: b}
+"#;
+        let err = from_yaml(src).err().unwrap().to_string();
+        assert!(err.contains("mixes conditional"), "{err}");
+    }
+
+    #[test]
+    fn rejects_edge_from_unknown_node() {
+        let src = r#"
+name: t
+entry: a
+nodes:
+  a: {type: script, run: "true"}
+edges:
+  - {from: ghost, to: a}
+"#;
+        let err = from_yaml(src).err().unwrap().to_string();
+        assert!(err.contains("edge source `ghost`"), "{err}");
     }
 
     #[test]
