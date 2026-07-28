@@ -47,10 +47,12 @@ pub use library::load;
 pub use state::{State, Status};
 
 use nodes::{Node, NodeCtx};
+use state::Update;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::future::join_all;
+use futures::future::try_join_all;
+use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -248,6 +250,17 @@ impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// Exponential backoff before the `attempt`-th super-step retry (1-based):
+/// 250ms, 500ms, 1s, 2s, 4s, capped at 5s.
+fn retry_backoff(attempt: usize) -> Duration {
+    const BASE: Duration = Duration::from_millis(250);
+    const CAP: Duration = Duration::from_secs(5);
+    // Bound the shift so `1 << shift` can't overflow; `saturating_mul` and the
+    // cap keep the result sane for any larger attempt count.
+    let shift = (attempt.saturating_sub(1)).min(16) as u32;
+    BASE.saturating_mul(1u32 << shift).min(CAP)
 }
 
 /// Render a node's successor set for the audit `next` field: node names joined
@@ -472,6 +485,19 @@ impl Executor {
                                 attempt,
                                 error: format!("{e:#}"),
                             });
+                            // Back off before retrying — an instant retry against
+                            // a rate-limited/overloaded provider just fails again —
+                            // while staying responsive to cancellation.
+                            tokio::select! {
+                                _ = cancel.cancelled() => {
+                                    self.emit(|| AuditEvent::BlueprintCompleted {
+                                        steps: step + 1,
+                                        reason: CompletionReason::Cancelled,
+                                    });
+                                    return Ok(state);
+                                }
+                                _ = tokio::time::sleep(retry_backoff(attempt)) => {}
+                            }
                         }
                         Err(e) => {
                             self.emit(|| AuditEvent::BlueprintCompleted {
@@ -558,9 +584,9 @@ impl Executor {
     /// Run one super-step: execute every node in `frontier` concurrently against
     /// the (checkpointed) `state`, then merge their updates into it in a
     /// deterministic order. Returns each node's `(name, kind, status)` for the
-    /// audit trail. A hard error from any node aborts the whole super-step
-    /// (leaving `state` partially mutated — the caller retries from a fresh
-    /// checkpoint clone, so that partial state is discarded).
+    /// audit trail. A hard error from any node aborts the super-step before any
+    /// merge (so `state` is left untouched) and cancels the sibling futures; the
+    /// caller retries from a fresh checkpoint clone.
     async fn run_frontier(
         graph: &Graph,
         cx: &NodeCtx<'_>,
@@ -579,20 +605,31 @@ impl Executor {
         }
 
         // Run concurrently against a shared read-only view of the state.
-        // `join_all` preserves input order, so results line up with the sorted
-        // frontier for a deterministic merge below.
+        // `try_join_all` preserves input order (so the merge below is
+        // deterministic) and short-circuits on the first error, dropping — and
+        // thereby cancelling — the sibling futures rather than letting expensive
+        // agent/script/human nodes run on after a peer has already failed.
         let snapshot: &State = state;
-        let results = join_all(runnables.iter().map(|(name, node)| async move {
-            (name.clone(), node.kind(), node.run(snapshot, cx).await)
-        }))
-        .await;
+        let outcomes: Vec<(String, NodeKind, Update)> =
+            try_join_all(runnables.iter().map(|(name, node)| async move {
+                let update = node
+                    .run(snapshot, cx)
+                    .await
+                    .map_err(|e| e.context(format!("blueprint node `{name}` failed")))?;
+                anyhow::Ok((name.clone(), node.kind(), update))
+            }))
+            .await?;
 
-        let mut ran: Vec<(String, NodeKind, NodeStatus)> = Vec::with_capacity(results.len());
+        // Merge each node's update into the state. `vars` uses last-write-wins
+        // (see `State::apply`); in a fan-out, results merge in sorted-frontier
+        // order, so two parallel nodes writing the *same* `vars` key resolve
+        // deterministically but by name order. In practice each node writes only
+        // its own name key (unique), so this collides only for nodes that emit a
+        // shared custom key.
+        let mut ran: Vec<(String, NodeKind, NodeStatus)> = Vec::with_capacity(outcomes.len());
         let mut any_failed = false;
         let mut any_status = false;
-        for (name, kind, result) in results {
-            let update =
-                result.map_err(|e| e.context(format!("blueprint node `{name}` failed")))?;
+        for (name, kind, update) in outcomes {
             let node_status = match update.status {
                 Some(Status::Failed) => {
                     any_failed = true;

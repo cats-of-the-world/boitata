@@ -31,7 +31,10 @@ pub struct State {
     /// Outcome of the last node. Channel reducer: last-write.
     pub status: Option<Status>,
     /// Free-form values nodes emit for routing and prompt/arg templating.
-    /// Channel reducer: merge.
+    /// Channel reducer: merge, last-write-wins per key. When a super-step fans
+    /// out, updates merge in sorted node-name order, so two parallel nodes
+    /// writing the same key resolve deterministically (by name); in practice each
+    /// node writes only its own unique name key.
     pub vars: HashMap<String, String>,
 }
 
