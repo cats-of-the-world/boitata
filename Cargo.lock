@@ -134,6 +134,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "futures",
  "libc",
  "regex",
  "reqwest 0.12.28",

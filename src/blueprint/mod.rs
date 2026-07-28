@@ -18,14 +18,18 @@
 //   - script: runs a shell script (reusing the exec infrastructure), routing on
 //             its exit code
 //
-// Edges: `Static(from -> to)` or `Conditional(from -> router(state) -> next)`,
-// where a target may be the `END` sentinel. A node with no outgoing edge ends the
-// run.
+// Edges: `Static(from -> [to, ...])` or `Conditional(from -> router(state) ->
+// [next, ...])`. A source may fan out to several successors; a target may be the
+// `END` sentinel; a node with no outgoing edge ends its path.
 //
-// The executor is sequential: one node runs per step, its update is merged into
-// the state, then routing picks the next node, until END or a step limit
-// (`max_steps`, which bounds cyclic graphs). Ctrl-C cancels the run, and each
-// step emits audit events (see `crate::audit`).
+// The executor advances in super-steps (a Pregel/LangGraph-style model): each
+// super-step runs the whole frontier (the active node set) concurrently, merges
+// their updates through the channel reducers, then routes each node — the union
+// of successors (minus END, de-duplicated) becomes the next frontier. This gives
+// fan-out (a node with several successors) and fan-in (several predecessors of
+// one node collapse to a single run). The run ends when the frontier empties, or
+// at a step limit (`max_steps`, which bounds cyclic graphs). Ctrl-C cancels the
+// run, and each super-step emits audit events (see `crate::audit`).
 //
 // Blueprints are defined in YAML (see `yaml.rs`). A small starter library ships
 // embedded in the binary, and `--blueprint` also accepts a path to a user's own
@@ -43,11 +47,12 @@ use nodes::{Node, NodeCtx};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::future::join_all;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::audit::{AuditEvent, AuditSink, CompletionReason, NodeStatus};
+use crate::audit::{AuditEvent, AuditSink, CompletionReason, NodeKind, NodeStatus};
 use crate::provider::Provider;
 use crate::tools::{ToolPolicy, ToolRegistry};
 
@@ -57,13 +62,17 @@ pub const END: &str = "__end__";
 /// Default cap on executed nodes, so a cyclic graph can't loop forever.
 const DEFAULT_MAX_STEPS: usize = 50;
 
-/// How the run proceeds after a node finishes.
-type Router = Box<dyn Fn(&State) -> String + Send + Sync>;
+/// How the run proceeds after a node finishes: the set of successor nodes to
+/// activate. Returning several is a fan-out; an [`END`] entry (or an empty set)
+/// terminates that path. The executor drops [`END`], de-duplicates, and unions
+/// these across the nodes that ran to form the next super-step's frontier.
+type Router = Box<dyn Fn(&State) -> Vec<String> + Send + Sync>;
 
 enum Routing {
-    /// Always go to a fixed node (or END).
-    Static(String),
-    /// Choose the next node (or END) from the state.
+    /// Activate a fixed set of successors (one is the common case; more than one
+    /// is a fan-out). Any entry may be [`END`].
+    Static(Vec<String>),
+    /// Compute the successor set from the state.
     Conditional(Router),
 }
 
@@ -86,15 +95,15 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// Test helper: the node `route` picks after `current`, given `status` as the
-    /// last node's outcome. Lets the YAML loader's tests assert routing without
-    /// running nodes.
+    /// Test helper: the successor set `route` picks after `current`, given
+    /// `status` as the last node's outcome. Lets the YAML loader's tests assert
+    /// routing without running nodes.
     #[cfg(test)]
     pub(crate) fn route_with_status_for_test(
         &self,
         current: &str,
         status: Option<Status>,
-    ) -> String {
+    ) -> Vec<String> {
         let mut state = State::new(String::new());
         state.status = status;
         Executor::route(self, current, &state).unwrap()
@@ -103,7 +112,7 @@ impl Graph {
     /// Test helper: routing after `current` with no prior status (treated as
     /// success by conditional routers).
     #[cfg(test)]
-    pub(crate) fn route_for_test(&self, current: &str) -> String {
+    pub(crate) fn route_for_test(&self, current: &str) -> Vec<String> {
         self.route_with_status_for_test(current, None)
     }
 
@@ -114,7 +123,7 @@ impl Graph {
             nodes: HashMap::new(),
             edges: HashMap::new(),
             duplicate_nodes: Vec::new(),
-            duplicate_edges: Vec::new(),
+            edge_conflicts: Vec::new(),
         }
     }
 }
@@ -127,8 +136,10 @@ pub struct GraphBuilder {
     edges: HashMap<String, Routing>,
     /// Node names added more than once; rejected by `build`.
     duplicate_nodes: Vec<String>,
-    /// Edge sources given more than one outgoing edge; rejected by `build`.
-    duplicate_edges: Vec<String>,
+    /// Edge sources whose routing is contradictory — a conditional combined with
+    /// any other edge (fan-out static edges from one source are fine, but they
+    /// can't be mixed with a router). Rejected by `build`.
+    edge_conflicts: Vec<String>,
 }
 
 impl GraphBuilder {
@@ -142,29 +153,41 @@ impl GraphBuilder {
         self
     }
 
-    /// Add an unconditional edge `from -> to` (`to` may be [`END`]). Defining
-    /// more than one outgoing edge for the same `from` is rejected by `build`.
+    /// Add an unconditional edge `from -> to` (`to` may be [`END`]). Calling this
+    /// more than once for the same `from` fans out to all the targets; mixing it
+    /// with a conditional edge on the same `from` is rejected by `build`.
     pub fn edge(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
-        self.insert_edge(from.into(), Routing::Static(to.into()));
+        let from = from.into();
+        match self.edges.get_mut(&from) {
+            Some(Routing::Static(targets)) => targets.push(to.into()),
+            // A router already governs this source; a static edge can't be added.
+            Some(Routing::Conditional(_)) => self.edge_conflicts.push(from),
+            None => {
+                self.edges.insert(from, Routing::Static(vec![to.into()]));
+            }
+        }
         self
     }
 
-    /// Add a conditional edge: after `from`, `router(state)` picks the next node
-    /// (or [`END`]). Defining more than one outgoing edge for the same `from` is
-    /// rejected by `build`.
+    /// Add a conditional edge: after `from`, `router(state)` picks the successor
+    /// set (each may be [`END`]; several is a fan-out). A source may have at most
+    /// one router and no other edges; violations are rejected by `build`.
     pub fn conditional(
         mut self,
         from: impl Into<String>,
-        router: impl Fn(&State) -> String + Send + Sync + 'static,
+        router: impl Fn(&State) -> Vec<String> + Send + Sync + 'static,
     ) -> Self {
-        self.insert_edge(from.into(), Routing::Conditional(Box::new(router)));
-        self
-    }
-
-    fn insert_edge(&mut self, from: String, routing: Routing) {
-        if self.edges.insert(from.clone(), routing).is_some() {
-            self.duplicate_edges.push(from);
+        let from = from.into();
+        // A conditional must be the sole routing for its source: if anything is
+        // already registered (static or another router), that's a conflict.
+        if self
+            .edges
+            .insert(from.clone(), Routing::Conditional(Box::new(router)))
+            .is_some()
+        {
+            self.edge_conflicts.push(from);
         }
+        self
     }
 
     /// Validate and finalize the graph. Checks that the entry and all static
@@ -178,9 +201,9 @@ impl GraphBuilder {
                 "duplicate node name(s): {dupes}"
             )));
         }
-        if let Some(dupes) = dedup_names(&mut self.duplicate_edges) {
+        if let Some(dupes) = dedup_names(&mut self.edge_conflicts) {
             return Err(BlueprintError::Invalid(format!(
-                "node(s) with more than one outgoing edge: {dupes}"
+                "node(s) with a conditional edge mixed with other edges: {dupes}"
             )));
         }
         if !self.nodes.contains_key(&self.entry) {
@@ -195,11 +218,13 @@ impl GraphBuilder {
                     "edge source `{from}` is not a node"
                 )));
             }
-            if let Routing::Static(to) = routing {
-                if !known(to) {
-                    return Err(BlueprintError::Invalid(format!(
-                        "edge `{from}` -> `{to}` targets an unknown node"
-                    )));
+            if let Routing::Static(targets) = routing {
+                for to in targets {
+                    if !known(to) {
+                        return Err(BlueprintError::Invalid(format!(
+                            "edge `{from}` -> `{to}` targets an unknown node"
+                        )));
+                    }
                 }
             }
         }
@@ -220,6 +245,20 @@ impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// Render a node's successor set for the audit `next` field: node names joined
+/// by `+`, with the [`END`] sentinel shown as `END`. An empty set (a path that
+/// ends) renders as `END` too.
+fn display_routes(routes: &[String]) -> String {
+    if routes.is_empty() {
+        return "END".to_string();
+    }
+    routes
+        .iter()
+        .map(|t| if t == END { "END" } else { t.as_str() })
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 /// Sort and de-duplicate collected duplicate names; return them joined for an
@@ -358,50 +397,97 @@ impl Executor {
         let mut state = State::new(task);
         let cx = self.node_ctx(cancel.clone());
 
-        // `steps` in the completion events is the number of nodes executed. The
-        // normal path reaches END at the top of iteration `step` having run `step`
-        // nodes; the cancelled path is mid-iteration having run `step + 1`; the
-        // step-limit path has run `max_steps`. All three are that same count.
-        let mut current = graph.entry.clone();
+        // The run advances in super-steps: each super-step runs the whole
+        // frontier (the active node set) concurrently, merges their updates, then
+        // routes each to its successors — the union of which (minus END, dedup'd)
+        // is the next frontier. `steps` in the completion events counts
+        // super-steps; for a linear graph that equals nodes executed.
+        let mut frontier = vec![graph.entry.clone()];
         for step in 0..self.max_steps {
-            if current == END {
+            // A stable order makes concurrent merges and audit events
+            // deterministic, and dedups a node reached by several predecessors
+            // (fan-in) so it runs once per super-step.
+            frontier.sort();
+            frontier.dedup();
+
+            if frontier.is_empty() {
                 self.emit(|| AuditEvent::BlueprintCompleted {
                     steps: step,
                     reason: CompletionReason::Completed,
                 });
                 return Ok(state);
             }
+            debug!("Blueprint super-step {}: frontier {frontier:?}", step + 1);
 
-            let node = graph
-                .nodes
-                .get(&current)
-                .ok_or_else(|| BlueprintError::UnknownNode(current.clone()))?;
-            let kind = node.kind();
-            debug!("Blueprint step {}: node `{current}` ({kind:?})", step + 1);
-
-            let update = match node.run(&state, &cx).await {
-                Ok(update) => update,
-                Err(e) => {
+            // Resolve every frontier node before running so an unknown one is a
+            // clean error rather than a panic inside a future.
+            let mut runnables = Vec::with_capacity(frontier.len());
+            for name in &frontier {
+                let node = graph.nodes.get(name).ok_or_else(|| {
                     self.emit(|| AuditEvent::BlueprintCompleted {
                         steps: step + 1,
                         reason: CompletionReason::Error,
                     });
-                    return Err(e.context(format!("blueprint node `{current}` failed")));
-                }
-            };
-            // Record the status this node reported, before merging, so the audit
-            // event reflects the node itself rather than depending on the `status`
-            // channel's reducer staying last-write.
-            let node_status = update.status;
-            state.apply(update);
-            let status = match node_status {
-                Some(Status::Failed) => NodeStatus::Failed,
-                _ => NodeStatus::Ok,
-            };
+                    BlueprintError::UnknownNode(name.clone())
+                })?;
+                runnables.push((name.clone(), node));
+            }
 
-            // Stop if cancelled while the node was running.
+            // Run the frontier concurrently. `join_all` preserves input order, so
+            // results line up with the sorted frontier for a deterministic merge.
+            let results = join_all(runnables.iter().map(|(name, node)| {
+                let state = &state;
+                let cx = &cx;
+                async move { (name.clone(), node.kind(), node.run(state, cx).await) }
+            }))
+            .await;
+
+            // Merge each node's update (sorted order → deterministic), capturing
+            // its own status for the audit trail. A hard error from any node
+            // fails the run.
+            let mut ran: Vec<(String, NodeKind, NodeStatus)> = Vec::with_capacity(results.len());
+            let mut any_failed = false;
+            let mut any_status = false;
+            for (name, kind, result) in results {
+                let update = match result {
+                    Ok(update) => update,
+                    Err(e) => {
+                        self.emit(|| AuditEvent::BlueprintCompleted {
+                            steps: step + 1,
+                            reason: CompletionReason::Error,
+                        });
+                        return Err(e.context(format!("blueprint node `{name}` failed")));
+                    }
+                };
+                let node_status = match update.status {
+                    Some(Status::Failed) => {
+                        any_failed = true;
+                        any_status = true;
+                        NodeStatus::Failed
+                    }
+                    Some(Status::Ok) => {
+                        any_status = true;
+                        NodeStatus::Ok
+                    }
+                    None => NodeStatus::Ok,
+                };
+                state.apply(update);
+                ran.push((name, kind, node_status));
+            }
+            // Super-step status: failure dominates a fan-out, so verify-style
+            // routing sees a failure if any parallel branch failed. For a
+            // single-node super-step this is just that node's status.
+            if any_status {
+                state.status = Some(if any_failed {
+                    Status::Failed
+                } else {
+                    Status::Ok
+                });
+            }
+
+            // Stop if cancelled while the super-step was running.
             if cancel.is_cancelled() {
-                warn!("Blueprint cancelled at node `{current}`");
+                warn!("Blueprint cancelled during super-step {}", step + 1);
                 self.emit(|| AuditEvent::BlueprintCompleted {
                     steps: step + 1,
                     reason: CompletionReason::Cancelled,
@@ -409,33 +495,37 @@ impl Executor {
                 return Ok(state);
             }
 
-            let next = match Self::route(graph, &current, &state) {
-                Ok(next) => next,
-                Err(e) => {
-                    // The node did run; record it (with no successor) before the
-                    // terminal event so the audit trail isn't missing this step.
-                    self.emit(|| AuditEvent::NodeExecuted {
-                        step: step + 1,
-                        node: current.clone(),
-                        kind,
-                        status,
-                        next: String::new(),
-                    });
-                    self.emit(|| AuditEvent::BlueprintCompleted {
-                        steps: step + 1,
-                        reason: CompletionReason::Error,
-                    });
-                    return Err(e.context(format!("routing after node `{current}`")));
-                }
-            };
-            self.emit(|| AuditEvent::NodeExecuted {
-                step: step + 1,
-                node: current.clone(),
-                kind,
-                status,
-                next: next.clone(),
-            });
-            current = next;
+            // Route every node that ran; the live (non-END) successors form the
+            // next frontier.
+            let mut next = Vec::new();
+            for (name, kind, status) in ran {
+                let routes = match Self::route(graph, &name, &state) {
+                    Ok(routes) => routes,
+                    Err(e) => {
+                        self.emit(|| AuditEvent::NodeExecuted {
+                            step: step + 1,
+                            node: name.clone(),
+                            kind,
+                            status,
+                            next: String::new(),
+                        });
+                        self.emit(|| AuditEvent::BlueprintCompleted {
+                            steps: step + 1,
+                            reason: CompletionReason::Error,
+                        });
+                        return Err(e.context(format!("routing after node `{name}`")));
+                    }
+                };
+                self.emit(|| AuditEvent::NodeExecuted {
+                    step: step + 1,
+                    node: name.clone(),
+                    kind,
+                    status,
+                    next: display_routes(&routes),
+                });
+                next.extend(routes.into_iter().filter(|t| t != END));
+            }
+            frontier = next;
         }
 
         warn!(
@@ -449,18 +539,21 @@ impl Executor {
         Err(BlueprintError::StepLimit(self.max_steps).into())
     }
 
-    /// Pick the next node after `current`. A node with no outgoing edge ends the
-    /// run.
-    fn route(graph: &Graph, current: &str, state: &State) -> anyhow::Result<String> {
-        let next = match graph.edges.get(current) {
-            Some(Routing::Static(to)) => to.clone(),
+    /// The successor set after `current`: the node's static targets, its router's
+    /// output, or `[END]` when it has no outgoing edge. Every non-END target is
+    /// checked to be a real node.
+    fn route(graph: &Graph, current: &str, state: &State) -> anyhow::Result<Vec<String>> {
+        let targets = match graph.edges.get(current) {
+            Some(Routing::Static(targets)) => targets.clone(),
             Some(Routing::Conditional(router)) => router(state),
-            None => END.to_string(),
+            None => vec![END.to_string()],
         };
-        if next != END && !graph.nodes.contains_key(&next) {
-            return Err(BlueprintError::UnknownNode(next).into());
+        for target in &targets {
+            if target != END && !graph.nodes.contains_key(target) {
+                return Err(BlueprintError::UnknownNode(target.clone()).into());
+            }
         }
-        Ok(next)
+        Ok(targets)
     }
 }
 
@@ -592,8 +685,8 @@ mod tests {
             })
             .edge("work", "check")
             .conditional("check", |state| match state.status {
-                Some(Status::Failed) => "work".to_string(),
-                _ => END.to_string(),
+                Some(Status::Failed) => vec!["work".to_string()],
+                _ => vec![END.to_string()],
             })
             .build()
             .unwrap();
@@ -660,7 +753,7 @@ mod tests {
             .node(ScriptNode::new("setup", "echo preparing"))
             .node(ScriptNode::new("check", "exit 3"))
             .edge("setup", "check")
-            .conditional("check", |_state| END.to_string())
+            .conditional("check", |_state| vec![END.to_string()])
             .build()
             .unwrap();
 
@@ -727,19 +820,74 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_duplicate_edges() {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let result = Graph::builder("g", "a")
+    fn build_rejects_conditional_mixed_with_other_edges() {
+        // A conditional edge must be a source's sole routing: combining it with a
+        // static edge (in either order) is a conflict. (Multiple *static* edges,
+        // by contrast, are a valid fan-out.)
+        let build = |static_first: bool| {
+            let node = CountingNode {
+                name: "a".into(),
+                status: Status::Ok,
+                runs: Arc::new(AtomicUsize::new(0)),
+            };
+            let b = Graph::builder("g", "a").node(node);
+            let b = if static_first {
+                b.edge("a", END).conditional("a", |_| vec![END.to_string()])
+            } else {
+                b.conditional("a", |_| vec![END.to_string()]).edge("a", END)
+            };
+            b.build()
+        };
+        for static_first in [true, false] {
+            assert!(
+                matches!(build(static_first), Err(BlueprintError::Invalid(msg)) if msg.contains("conditional edge mixed")),
+                "static_first={static_first} should be a conflict"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fan_out_and_fan_in_run_each_node_once() {
+        // a -> {b, c} -> d (diamond). b and c run concurrently in one super-step;
+        // d is reached from both but runs once (fan-in dedup).
+        let counts: HashMap<&str, Arc<AtomicUsize>> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|&n| (n, Arc::new(AtomicUsize::new(0))))
+            .collect();
+        let graph = Graph::builder("diamond", "a")
             .node(CountingNode {
                 name: "a".into(),
                 status: Status::Ok,
-                runs,
+                runs: counts["a"].clone(),
             })
-            .edge("a", END)
-            .edge("a", END) // second outgoing edge for `a`
-            .build();
-        assert!(
-            matches!(result, Err(BlueprintError::Invalid(msg)) if msg.contains("more than one outgoing edge"))
-        );
+            .node(CountingNode {
+                name: "b".into(),
+                status: Status::Ok,
+                runs: counts["b"].clone(),
+            })
+            .node(CountingNode {
+                name: "c".into(),
+                status: Status::Ok,
+                runs: counts["c"].clone(),
+            })
+            .node(CountingNode {
+                name: "d".into(),
+                status: Status::Ok,
+                runs: counts["d"].clone(),
+            })
+            .edge("a", "b")
+            .edge("a", "c")
+            .edge("b", "d")
+            .edge("c", "d")
+            .edge("d", END)
+            .build()
+            .unwrap();
+
+        let state = executor().run(&graph, "task".into()).await.unwrap();
+        for n in ["a", "b", "c", "d"] {
+            assert_eq!(counts[n].load(Ordering::SeqCst), 1, "node {n} ran once");
+        }
+        // Every node contributed exactly one transcript entry.
+        assert_eq!(state.messages.len(), 4);
     }
 }

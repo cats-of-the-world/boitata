@@ -153,29 +153,28 @@ fn add_edges(
         if has_conditional {
             builder = add_conditional(builder, &from, group, known)?;
         } else {
-            // No `when`: exactly one unconditional edge is allowed.
-            if group.len() != 1 {
-                bail!(
-                    "node `{from}` has multiple unconditional edges; use `when: success|failure` to branch"
-                );
+            // No `when`: one edge is the common case; several fan out to all of
+            // the targets (they run together in the next super-step).
+            for edge in group {
+                let to = normalize_target(&edge.to);
+                builder = builder.edge(from.clone(), to);
             }
-            let to = normalize_target(&group[0].to);
-            builder = builder.edge(from, to);
         }
     }
     Ok(builder)
 }
 
 /// Fold a group of `when`-tagged edges out of `from` into one router that maps
-/// the last node's status to a target (falling back to [`END`]).
+/// the last node's status to its successor set. Several edges sharing a `when`
+/// fan out; a status with no edge yields an empty set (that path ends).
 fn add_conditional(
     builder: GraphBuilder,
     from: &str,
     group: Vec<EdgeDef>,
     known: &HashSet<String>,
 ) -> anyhow::Result<GraphBuilder> {
-    let mut on_success: Option<String> = None;
-    let mut on_failure: Option<String> = None;
+    let mut on_success: Vec<String> = Vec::new();
+    let mut on_failure: Vec<String> = Vec::new();
     for edge in group {
         // `add_edges` rejects mixed groups, so every edge here carries a `when`.
         let when = edge
@@ -188,24 +187,22 @@ fn add_conditional(
         if target != END && !known.contains(&target) {
             bail!("edge `{from}` -> `{target}` (when: {when}) targets an unknown node");
         }
-        let slot = match when {
-            "success" => &mut on_success,
-            "failure" => &mut on_failure,
+        match when {
+            "success" => on_success.push(target),
+            "failure" => on_failure.push(target),
             other => bail!("edge from `{from}` has unknown `when: {other}` (use success|failure)"),
-        };
-        if slot.replace(target).is_some() {
-            bail!("node `{from}` has two `when: {when}` edges");
         }
     }
 
-    // Routes not covered by an edge fall through to END. A missing node status
-    // (only before any node has run) is treated as success.
+    // The `when` set matching the last node's status is the successor set; a
+    // missing status (only before any node has run) is treated as success. END
+    // entries are dropped by the executor, so an all-END set ends the path.
     Ok(builder.conditional(from.to_string(), move |state| {
-        let target = match state.status {
-            Some(Status::Failed) => on_failure.as_deref(),
-            _ => on_success.as_deref(),
-        };
-        target.unwrap_or(END).to_string()
+        match state.status {
+            Some(Status::Failed) => &on_failure,
+            _ => &on_success,
+        }
+        .clone()
     }))
 }
 
@@ -249,15 +246,15 @@ edges:
         let graph = from_yaml(SAMPLE).expect("valid blueprint");
         // Static edges resolve to their targets; the conditional router branches
         // on status: failure -> fix, success -> END.
-        assert_eq!(graph.route_for_test("fix"), "fmt");
-        assert_eq!(graph.route_for_test("fmt"), "verify");
+        assert_eq!(graph.route_for_test("fix"), ["fmt"]);
+        assert_eq!(graph.route_for_test("fmt"), ["verify"]);
         assert_eq!(
             graph.route_with_status_for_test("verify", Some(Status::Failed)),
-            "fix"
+            ["fix"]
         );
         assert_eq!(
             graph.route_with_status_for_test("verify", Some(Status::Ok)),
-            END
+            [END]
         );
     }
 
@@ -272,7 +269,7 @@ edges:
   - {from: a, to: end}
 "#;
         let graph = from_yaml(src).unwrap();
-        assert_eq!(graph.route_for_test("a"), END);
+        assert_eq!(graph.route_for_test("a"), [END]);
     }
 
     #[test]
@@ -286,7 +283,7 @@ nodes:
         // A tool node with no `args` compiles (args default to `{}`), and a node
         // with no outgoing edge ends the run.
         let graph = from_yaml(src).unwrap();
-        assert_eq!(graph.route_for_test("a"), END);
+        assert_eq!(graph.route_for_test("a"), [END]);
     }
 
     #[test]
@@ -304,35 +301,43 @@ edges:
     }
 
     #[test]
-    fn rejects_duplicate_when_branch() {
+    fn repeated_when_fans_out() {
+        // Several edges sharing a `when` fan out on that status.
         let src = r#"
 name: t
 entry: a
 nodes:
   a: {type: script, run: "true"}
   b: {type: script, run: "true"}
+  c: {type: script, run: "true"}
 edges:
-  - {from: a, when: failure, to: a}
   - {from: a, when: failure, to: b}
+  - {from: a, when: failure, to: c}
 "#;
-        let err = from_yaml(src).err().unwrap().to_string();
-        assert!(err.contains("two `when: failure`"), "{err}");
+        let graph = from_yaml(src).unwrap();
+        let mut routes = graph.route_with_status_for_test("a", Some(Status::Failed));
+        routes.sort();
+        assert_eq!(routes, ["b", "c"]);
     }
 
     #[test]
-    fn rejects_multiple_unconditional_edges() {
+    fn multiple_unconditional_edges_fan_out() {
+        // Several unconditional edges from one node fan out to all targets.
         let src = r#"
 name: t
 entry: a
 nodes:
   a: {type: script, run: "true"}
   b: {type: script, run: "true"}
+  c: {type: script, run: "true"}
 edges:
   - {from: a, to: b}
-  - {from: a, to: END}
+  - {from: a, to: c}
 "#;
-        let err = from_yaml(src).err().unwrap().to_string();
-        assert!(err.contains("multiple unconditional edges"), "{err}");
+        let graph = from_yaml(src).unwrap();
+        let mut routes = graph.route_for_test("a");
+        routes.sort();
+        assert_eq!(routes, ["b", "c"]);
     }
 
     #[test]
