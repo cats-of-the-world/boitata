@@ -223,7 +223,7 @@ impl ToolRegistry {
     /// name is not registered, so a blueprint that scopes an agent to a
     /// misspelled tool fails loudly rather than silently dropping it.
     pub fn subset(&self, names: &[String]) -> Result<ToolRegistry> {
-        let mut tools = HashMap::new();
+        let mut tools = HashMap::with_capacity(names.len());
         for name in names {
             let tool = self
                 .tools
