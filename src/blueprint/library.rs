@@ -52,7 +52,9 @@ pub fn load(name_or_path: &str) -> anyhow::Result<Graph> {
     // and reported as a missing file rather than an unknown blueprint.
     let path = Path::new(name_or_path);
     let looks_like_path = name_or_path.contains('/')
-        || name_or_path.contains('\\')
+        // `\` is only a path separator on Windows; on Unix it's a valid filename
+        // character, so a bare name containing one shouldn't look like a path.
+        || (cfg!(target_os = "windows") && name_or_path.contains('\\'))
         || path
             .extension()
             .is_some_and(|ext| ext == "yaml" || ext == "yml");
@@ -89,16 +91,17 @@ mod tests {
     fn starters_match_blueprints_dir() {
         // Guard against drift the other way: a `.yaml` added under `blueprints/`
         // but not listed in `STARTERS` (so it would ship unreachable by name).
-        use std::collections::HashSet;
+        // BTreeSet so a mismatch lists entries in a stable, sorted order.
+        use std::collections::BTreeSet;
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/blueprints");
-        let on_disk: HashSet<String> = fs::read_dir(dir)
-            .unwrap()
+        let on_disk: BTreeSet<String> = fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("blueprints dir not found at {dir}: {e}"))
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
             .filter_map(|path| path.file_stem()?.to_str().map(str::to_string))
             .collect();
-        let registered: HashSet<String> = starter_names()
+        let registered: BTreeSet<String> = starter_names()
             .iter()
             .map(|name| name.to_string())
             .collect();

@@ -32,6 +32,7 @@ use super::{END, Graph, GraphBuilder};
 
 /// A blueprint as written in YAML, before compilation into a [`Graph`].
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BlueprintDef {
     name: String,
     entry: String,
@@ -44,7 +45,7 @@ struct BlueprintDef {
 /// One node, tagged by `type`. Fields are per-kind; the node's name is the key
 /// it is stored under in `nodes`.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum NodeDef {
     /// Run the LLM agent loop on `prompt`, optionally scoped to `tools`.
     Agent {
@@ -70,6 +71,7 @@ fn empty_args() -> Value {
 
 /// One edge. Either unconditional (`to` only) or conditional (`when` + `to`).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EdgeDef {
     from: String,
     to: String,
@@ -332,6 +334,37 @@ edges:
 "#;
         let err = from_yaml(src).err().unwrap().to_string();
         assert!(err.contains("nowhere"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unknown_fields() {
+        // A typo in a schema key is a load-time error, not a silently ignored
+        // field. Covers the top-level struct, an edge, and a node (tagged enum).
+        let top = r#"
+name: t
+entry: a
+nodez:
+  a: {type: tool, tool: cargo_fmt}
+"#;
+        assert!(from_yaml(top).is_err(), "unknown top-level field accepted");
+
+        let edge = r#"
+name: t
+entry: a
+nodes:
+  a: {type: tool, tool: cargo_fmt}
+edges:
+  - {form: a, to: END}
+"#;
+        assert!(from_yaml(edge).is_err(), "unknown edge field accepted");
+
+        let node = r#"
+name: t
+entry: a
+nodes:
+  a: {type: agent, promt: "hi"}
+"#;
+        assert!(from_yaml(node).is_err(), "unknown node field accepted");
     }
 
     #[test]
