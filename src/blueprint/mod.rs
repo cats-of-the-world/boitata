@@ -283,6 +283,9 @@ pub struct Executor {
     max_iterations: Option<usize>,
     compact_threshold: Option<f32>,
     max_steps: usize,
+    /// How many times to retry a super-step that fails with a hard error before
+    /// giving up. `0` (the default) means no retries.
+    max_retries: usize,
 }
 
 impl Executor {
@@ -296,6 +299,7 @@ impl Executor {
             max_iterations: None,
             compact_threshold: None,
             max_steps: DEFAULT_MAX_STEPS,
+            max_retries: 0,
         }
     }
 
@@ -324,10 +328,18 @@ impl Executor {
         self
     }
 
-    /// Cap on executed nodes before the run aborts, bounding cyclic graphs.
+    /// Cap on super-steps before the run aborts, bounding cyclic graphs.
     /// Defaults to [`DEFAULT_MAX_STEPS`].
     pub fn with_max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = max_steps;
+        self
+    }
+
+    /// How many times to retry a super-step that fails with a hard node error,
+    /// each attempt restoring the pre-step state. `None` (or `0`) means no
+    /// retries.
+    pub fn with_max_retries(mut self, max_retries: Option<usize>) -> Self {
+        self.max_retries = max_retries.unwrap_or(0);
         self
     }
 
@@ -419,71 +431,44 @@ impl Executor {
             }
             debug!("Blueprint super-step {}: frontier {frontier:?}", step + 1);
 
-            // Resolve every frontier node before running so an unknown one is a
-            // clean error rather than a panic inside a future.
-            let mut runnables = Vec::with_capacity(frontier.len());
-            for name in &frontier {
-                let node = graph.nodes.get(name).ok_or_else(|| {
-                    self.emit(|| AuditEvent::BlueprintCompleted {
-                        steps: step + 1,
-                        reason: CompletionReason::Error,
-                    });
-                    BlueprintError::UnknownNode(name.clone())
-                })?;
-                runnables.push((name.clone(), node));
-            }
-
-            // Run the frontier concurrently. `join_all` preserves input order, so
-            // results line up with the sorted frontier for a deterministic merge.
-            let results = join_all(runnables.iter().map(|(name, node)| {
-                let state = &state;
-                let cx = &cx;
-                async move { (name.clone(), node.kind(), node.run(state, cx).await) }
-            }))
-            .await;
-
-            // Merge each node's update (sorted order → deterministic), capturing
-            // its own status for the audit trail. A hard error from any node
-            // fails the run.
-            let mut ran: Vec<(String, NodeKind, NodeStatus)> = Vec::with_capacity(results.len());
-            let mut any_failed = false;
-            let mut any_status = false;
-            for (name, kind, result) in results {
-                let update = match result {
-                    Ok(update) => update,
-                    Err(e) => {
-                        self.emit(|| AuditEvent::BlueprintCompleted {
-                            steps: step + 1,
-                            reason: CompletionReason::Error,
-                        });
-                        return Err(e.context(format!("blueprint node `{name}` failed")));
+            // Run the frontier, checkpointing the pre-step state so a hard node
+            // error can be retried from a clean slate up to `max_retries` times.
+            // (A soft `Failed` status is not an error — the graph routes on it;
+            // only a node returning `Err` — e.g. a transient provider failure —
+            // triggers a retry.) Each attempt re-runs the whole super-step.
+            let checkpoint = state.clone();
+            let ran = {
+                let mut attempt = 0;
+                loop {
+                    let mut trial = checkpoint.clone();
+                    match Self::run_frontier(graph, &cx, &frontier, &mut trial).await {
+                        Ok(ran) => {
+                            state = trial;
+                            break ran;
+                        }
+                        Err(e) if attempt < self.max_retries => {
+                            attempt += 1;
+                            warn!(
+                                "Blueprint super-step {} failed (retry {attempt}/{}): {e:#}",
+                                step + 1,
+                                self.max_retries
+                            );
+                            self.emit(|| AuditEvent::SuperStepRetried {
+                                step: step + 1,
+                                attempt,
+                                error: format!("{e:#}"),
+                            });
+                        }
+                        Err(e) => {
+                            self.emit(|| AuditEvent::BlueprintCompleted {
+                                steps: step + 1,
+                                reason: CompletionReason::Error,
+                            });
+                            return Err(e);
+                        }
                     }
-                };
-                let node_status = match update.status {
-                    Some(Status::Failed) => {
-                        any_failed = true;
-                        any_status = true;
-                        NodeStatus::Failed
-                    }
-                    Some(Status::Ok) => {
-                        any_status = true;
-                        NodeStatus::Ok
-                    }
-                    None => NodeStatus::Ok,
-                };
-                state.apply(update);
-                ran.push((name, kind, node_status));
-            }
-            // Super-step status: failure dominates a fan-out, so verify-style
-            // routing sees a failure if any parallel branch failed. For a
-            // single-node super-step this is just that node's status.
-            if any_status {
-                state.status = Some(if any_failed {
-                    Status::Failed
-                } else {
-                    Status::Ok
-                });
-            }
+                }
+            };
 
             // Stop if cancelled while the super-step was running.
             if cancel.is_cancelled() {
@@ -554,6 +539,72 @@ impl Executor {
             }
         }
         Ok(targets)
+    }
+
+    /// Run one super-step: execute every node in `frontier` concurrently against
+    /// the (checkpointed) `state`, then merge their updates into it in a
+    /// deterministic order. Returns each node's `(name, kind, status)` for the
+    /// audit trail. A hard error from any node aborts the whole super-step
+    /// (leaving `state` partially mutated — the caller retries from a fresh
+    /// checkpoint clone, so that partial state is discarded).
+    async fn run_frontier(
+        graph: &Graph,
+        cx: &NodeCtx<'_>,
+        frontier: &[String],
+        state: &mut State,
+    ) -> anyhow::Result<Vec<(String, NodeKind, NodeStatus)>> {
+        // Resolve every node up front so an unknown one is a clean error rather
+        // than a panic inside a future.
+        let mut runnables = Vec::with_capacity(frontier.len());
+        for name in frontier {
+            let node = graph
+                .nodes
+                .get(name)
+                .ok_or_else(|| BlueprintError::UnknownNode(name.clone()))?;
+            runnables.push((name.clone(), node));
+        }
+
+        // Run concurrently against a shared read-only view of the state.
+        // `join_all` preserves input order, so results line up with the sorted
+        // frontier for a deterministic merge below.
+        let snapshot: &State = state;
+        let results = join_all(runnables.iter().map(|(name, node)| async move {
+            (name.clone(), node.kind(), node.run(snapshot, cx).await)
+        }))
+        .await;
+
+        let mut ran: Vec<(String, NodeKind, NodeStatus)> = Vec::with_capacity(results.len());
+        let mut any_failed = false;
+        let mut any_status = false;
+        for (name, kind, result) in results {
+            let update =
+                result.map_err(|e| e.context(format!("blueprint node `{name}` failed")))?;
+            let node_status = match update.status {
+                Some(Status::Failed) => {
+                    any_failed = true;
+                    any_status = true;
+                    NodeStatus::Failed
+                }
+                Some(Status::Ok) => {
+                    any_status = true;
+                    NodeStatus::Ok
+                }
+                None => NodeStatus::Ok,
+            };
+            state.apply(update);
+            ran.push((name, kind, node_status));
+        }
+        // Super-step status: failure dominates a fan-out, so verify-style routing
+        // sees a failure if any parallel branch failed. For a single-node
+        // super-step this is just that node's status.
+        if any_status {
+            state.status = Some(if any_failed {
+                Status::Failed
+            } else {
+                Status::Ok
+            });
+        }
+        Ok(ran)
     }
 }
 
@@ -889,5 +940,74 @@ mod tests {
         }
         // Every node contributed exactly one transcript entry.
         assert_eq!(state.messages.len(), 4);
+    }
+
+    // A node whose `run` returns a hard error its first `fail_times` runs, then
+    // succeeds. Used to exercise super-step retry.
+    struct FlakyErrNode {
+        fail_times: usize,
+        runs: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl Node for FlakyErrNode {
+        fn name(&self) -> &str {
+            "flaky"
+        }
+        fn kind(&self) -> NodeKind {
+            NodeKind::Script
+        }
+        async fn run(&self, _s: &State, _c: &NodeCtx<'_>) -> anyhow::Result<Update> {
+            let n = self.runs.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_times {
+                anyhow::bail!("transient failure {n}");
+            }
+            Ok(Update::from_node("flaky", "recovered".into(), Status::Ok))
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_recovers_after_transient_errors() {
+        // Fails twice, then succeeds; two retries are enough. The failed
+        // attempts' partial state is discarded, so only one message survives.
+        let runs = Arc::new(AtomicUsize::new(0));
+        let graph = Graph::builder("retry", "flaky")
+            .node(FlakyErrNode {
+                fail_times: 2,
+                runs: runs.clone(),
+            })
+            .edge("flaky", END)
+            .build()
+            .unwrap();
+
+        let state = executor()
+            .with_max_retries(Some(2))
+            .run(&graph, "t".into())
+            .await
+            .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 3, "2 failures + 1 success");
+        assert_eq!(state.messages.len(), 1, "failed attempts leave no residue");
+        assert_eq!(state.status, Some(Status::Ok));
+    }
+
+    #[tokio::test]
+    async fn retry_exhausted_fails_the_run() {
+        // Fails three times but only two retries are allowed → the run fails.
+        let runs = Arc::new(AtomicUsize::new(0));
+        let graph = Graph::builder("retry", "flaky")
+            .node(FlakyErrNode {
+                fail_times: 5,
+                runs: runs.clone(),
+            })
+            .edge("flaky", END)
+            .build()
+            .unwrap();
+
+        let err = executor()
+            .with_max_retries(Some(2))
+            .run(&graph, "t".into())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("flaky"), "{err}");
+        assert_eq!(runs.load(Ordering::SeqCst), 3, "initial try + 2 retries");
     }
 }

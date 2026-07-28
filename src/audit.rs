@@ -103,6 +103,14 @@ pub enum AuditEvent {
         /// The next node the run moves to (or the END sentinel).
         next: String,
     },
+    /// A blueprint super-step failed with a hard error and is being retried from
+    /// the pre-step checkpoint.
+    SuperStepRetried {
+        step: usize,
+        /// 1-based retry number (the first retry is `1`).
+        attempt: usize,
+        error: String,
+    },
     /// A blueprint run finished.
     BlueprintCompleted {
         steps: usize,
@@ -229,6 +237,15 @@ mod tests {
         })
         .unwrap();
         assert!(done.contains(r#""reason":"step_limit""#));
+
+        let retried = serde_json::to_string(&AuditEvent::SuperStepRetried {
+            step: 2,
+            attempt: 1,
+            error: "boom".to_string(),
+        })
+        .unwrap();
+        assert!(retried.contains(r#""event":"super_step_retried""#));
+        assert!(retried.contains(r#""attempt":1"#));
     }
 
     #[test]
