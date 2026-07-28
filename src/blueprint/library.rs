@@ -46,8 +46,20 @@ pub fn load(name_or_path: &str) -> anyhow::Result<Graph> {
             .with_context(|| format!("built-in blueprint `{name_or_path}` is invalid"));
     }
 
+    // Only treat the input as a file path when it looks like one — a path
+    // separator or a `.yaml`/`.yml` extension. This keeps a mistyped starter
+    // name (e.g. `deafult`) from being silently resolved against the filesystem
+    // and reported as a missing file rather than an unknown blueprint.
     let path = Path::new(name_or_path);
-    if path.is_file() {
+    let looks_like_path = name_or_path.contains('/')
+        || name_or_path.contains('\\')
+        || path
+            .extension()
+            .is_some_and(|ext| ext == "yaml" || ext == "yml");
+    if looks_like_path {
+        if !path.is_file() {
+            bail!("blueprint file `{name_or_path}` not found");
+        }
         let src = fs::read_to_string(path)
             .with_context(|| format!("failed to read blueprint file `{name_or_path}`"))?;
         return from_yaml(&src)
@@ -74,10 +86,42 @@ mod tests {
     }
 
     #[test]
+    fn starters_match_blueprints_dir() {
+        // Guard against drift the other way: a `.yaml` added under `blueprints/`
+        // but not listed in `STARTERS` (so it would ship unreachable by name).
+        use std::collections::HashSet;
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/blueprints");
+        let on_disk: HashSet<String> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
+            .filter_map(|path| path.file_stem()?.to_str().map(str::to_string))
+            .collect();
+        let registered: HashSet<String> = starter_names()
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        assert_eq!(
+            on_disk, registered,
+            "blueprints/ directory and STARTERS are out of sync"
+        );
+    }
+
+    #[test]
     fn unknown_name_errors_and_lists_starters() {
         let err = load("does_not_exist").err().unwrap().to_string();
         assert!(err.contains("unknown blueprint"), "{err}");
         assert!(err.contains("default"), "{err}");
+    }
+
+    #[test]
+    fn missing_path_reports_file_not_found() {
+        // A path-shaped argument that doesn't exist is a missing file, not an
+        // "unknown blueprint" (which is reserved for bare-name typos).
+        let err = load("./nope.yaml").err().unwrap().to_string();
+        assert!(err.contains("not found"), "{err}");
+        assert!(!err.contains("unknown blueprint"), "{err}");
     }
 
     #[test]
