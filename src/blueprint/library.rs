@@ -29,6 +29,10 @@ const STARTERS: &[(&str, &str)] = &[
         "setup_devbox",
         include_str!("../../blueprints/setup_devbox.yaml"),
     ),
+    (
+        "human_approval",
+        include_str!("../../blueprints/human_approval.yaml"),
+    ),
 ];
 
 /// Names of the built-in starter blueprints, for help and error messages.

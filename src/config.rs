@@ -72,10 +72,15 @@ pub struct Config {
     /// compaction.
     #[serde(default)]
     pub auto_compact_threshold: Option<f32>,
-    /// Cap on how many nodes a blueprint run may execute (bounds cyclic graphs).
-    /// Only used with `--blueprint`; defaults to the executor's built-in limit.
+    /// Cap on how many super-steps a blueprint run may execute (bounds cyclic
+    /// graphs). Only used with `--blueprint`; defaults to the executor's limit.
     #[serde(default)]
     pub blueprint_max_steps: Option<usize>,
+    /// How many times to retry a blueprint super-step that fails with a hard
+    /// error, each attempt restoring the pre-step state. Only used with
+    /// `--blueprint`; defaults to no retries.
+    #[serde(default)]
+    pub blueprint_max_retries: Option<usize>,
 }
 
 /// A single MCP server. The transport is inferred from which field is set:
@@ -334,6 +339,7 @@ mod tests {
             denied_commands: Vec::new(),
             auto_compact_threshold: None,
             blueprint_max_steps: None,
+            blueprint_max_retries: None,
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("super-secret-key"), "{rendered}");

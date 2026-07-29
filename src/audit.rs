@@ -103,6 +103,14 @@ pub enum AuditEvent {
         /// The next node the run moves to (or the END sentinel).
         next: String,
     },
+    /// A blueprint super-step failed with a hard error and is being retried from
+    /// the pre-step checkpoint.
+    SuperStepRetried {
+        step: usize,
+        /// 1-based retry number (the first retry is `1`).
+        attempt: usize,
+        error: String,
+    },
     /// A blueprint run finished.
     BlueprintCompleted {
         steps: usize,
@@ -117,6 +125,7 @@ pub enum NodeKind {
     Agent,
     Tool,
     Script,
+    Human,
 }
 
 /// Outcome of a blueprint node.
@@ -223,12 +232,25 @@ mod tests {
         assert!(json.contains(r#""kind":"agent""#));
         assert!(json.contains(r#""status":"ok""#));
 
+        // The human node kind serializes to the snake_case tag too.
+        let human = serde_json::to_string(&NodeKind::Human).unwrap();
+        assert_eq!(human, r#""human""#);
+
         let done = serde_json::to_string(&AuditEvent::BlueprintCompleted {
             steps: 3,
             reason: CompletionReason::StepLimit,
         })
         .unwrap();
         assert!(done.contains(r#""reason":"step_limit""#));
+
+        let retried = serde_json::to_string(&AuditEvent::SuperStepRetried {
+            step: 2,
+            attempt: 1,
+            error: "boom".to_string(),
+        })
+        .unwrap();
+        assert!(retried.contains(r#""event":"super_step_retried""#));
+        assert!(retried.contains(r#""attempt":1"#));
     }
 
     #[test]

@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use super::human::HumanInterface;
 use super::state::{State, Status, Update, render, render_shell};
 use crate::agent::{Agent, Task};
 use crate::audit::{AuditSink, NodeKind};
@@ -27,7 +28,27 @@ pub struct NodeCtx<'a> {
     pub system_prompt: Option<&'a str>,
     pub max_iterations: Option<usize>,
     pub compact_threshold: Option<f32>,
+    pub human: Arc<dyn HumanInterface>,
     pub cancel: CancellationToken,
+}
+
+impl<'a> NodeCtx<'a> {
+    /// Clone this context but with a different cancellation token — used to hand
+    /// the frontier nodes a per-super-step child token, so one node's failure can
+    /// cancel its siblings without touching the run-wide token.
+    pub fn with_cancel(&self, cancel: CancellationToken) -> NodeCtx<'a> {
+        NodeCtx {
+            provider: self.provider.clone(),
+            tools: self.tools,
+            audit: self.audit.clone(),
+            policy: self.policy,
+            system_prompt: self.system_prompt,
+            max_iterations: self.max_iterations,
+            compact_threshold: self.compact_threshold,
+            human: self.human.clone(),
+            cancel,
+        }
+    }
 }
 
 /// A single step in a blueprint graph.
@@ -223,5 +244,77 @@ impl Node for ScriptNode {
                 Status::Failed,
             )),
         }
+    }
+}
+
+/// How a [`HumanNode`] interprets the operator's reply.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanMode {
+    /// Free-text: the reply text becomes the node's output; status is always Ok.
+    #[default]
+    Input,
+    /// A yes/no gate: an affirmative reply is `Ok`, anything else is `Failed`, so
+    /// a conditional edge can branch (`when: success` to proceed, `when: failure`
+    /// to abort).
+    Approval,
+}
+
+/// A node that pauses the run to collect input from a human operator, via the
+/// [`HumanInterface`] on the context (human-in-the-loop). The prompt may template
+/// `{task}` and `{<var>}` from state.
+pub struct HumanNode {
+    name: String,
+    prompt: String,
+    mode: HumanMode,
+}
+
+impl HumanNode {
+    pub fn new(name: impl Into<String>, prompt: impl Into<String>, mode: HumanMode) -> Self {
+        Self {
+            name: name.into(),
+            prompt: prompt.into(),
+            mode,
+        }
+    }
+}
+
+/// Whether an approval reply is affirmative: `y`, `yes`, or `ok` (any case). An
+/// empty reply (a bare Enter) is deliberately *not* affirmative, so approval
+/// defaults to "no".
+fn is_affirmative(reply: &str) -> bool {
+    matches!(
+        reply.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes" | "ok"
+    )
+}
+
+#[async_trait]
+impl Node for HumanNode {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> NodeKind {
+        NodeKind::Human
+    }
+
+    /// Presents the prompt and collects a reply. A missing input (non-interactive
+    /// stdin) or a cancellation is a hard error (propagated), not a `Failed`
+    /// status, so it can't be mistaken for a decline.
+    async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
+        let prompt = render(&self.prompt, state);
+        let reply = cx.human.prompt(&prompt, &cx.cancel).await?;
+        let update = match self.mode {
+            HumanMode::Input => Update::from_node(&self.name, reply, Status::Ok),
+            HumanMode::Approval => {
+                if is_affirmative(&reply) {
+                    Update::from_node(&self.name, "approved".to_string(), Status::Ok)
+                } else {
+                    Update::from_node(&self.name, "declined".to_string(), Status::Failed)
+                }
+            }
+        };
+        Ok(update)
     }
 }

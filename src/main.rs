@@ -277,6 +277,7 @@ async fn run_blueprint(
     if let Some(max_steps) = config.blueprint_max_steps {
         executor = executor.with_max_steps(max_steps);
     }
+    executor = executor.with_max_retries(config.blueprint_max_retries);
 
     info!("Running blueprint `{name}` on task: {task}");
     let state = executor.run(&graph, task).await?;
