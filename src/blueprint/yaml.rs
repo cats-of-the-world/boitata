@@ -266,6 +266,45 @@ edges:
     }
 
     #[test]
+    fn parses_human_node_modes() {
+        // Exercises the YAML path for the `human` variant: `mode: approval`, the
+        // default `mode` (input), and the `HumanMode` snake_case rename.
+        let src = r#"
+name: h
+entry: approve
+nodes:
+  approve: {type: human, mode: approval, prompt: "ok? {task}"}
+  ask: {type: human, prompt: "your name?"}
+edges:
+  - {from: approve, when: success, to: ask}
+  - {from: approve, when: failure, to: END}
+  - {from: ask, to: END}
+"#;
+        let graph = from_yaml(src).unwrap();
+        assert_eq!(
+            graph.route_with_status_for_test("approve", Some(Status::Ok)),
+            ["ask"]
+        );
+        assert_eq!(
+            graph.route_with_status_for_test("approve", Some(Status::Failed)),
+            [END]
+        );
+        assert_eq!(graph.route_for_test("ask"), [END]);
+    }
+
+    #[test]
+    fn rejects_unknown_human_mode() {
+        // `deny_unknown_fields` plus the mode enum reject a bad mode value.
+        let src = r#"
+name: h
+entry: a
+nodes:
+  a: {type: human, mode: shout, prompt: "hi"}
+"#;
+        assert!(from_yaml(src).is_err());
+    }
+
+    #[test]
     fn end_target_is_case_insensitive() {
         let src = r#"
 name: t

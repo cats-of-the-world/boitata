@@ -51,7 +51,7 @@ use state::Update;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::future::try_join_all;
+use futures::future::join_all;
 use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -318,7 +318,7 @@ impl Executor {
             compact_threshold: None,
             max_steps: DEFAULT_MAX_STEPS,
             max_retries: 0,
-            human: Arc::new(StdioHuman),
+            human: Arc::new(StdioHuman::new()),
         }
     }
 
@@ -473,6 +473,16 @@ impl Executor {
                             state = trial;
                             break ran;
                         }
+                        // A cancelled run reports as cancelled, not as a retryable
+                        // failure — the error here is just the interrupted node.
+                        Err(_) if cancel.is_cancelled() => {
+                            warn!("Blueprint cancelled during super-step {}", step + 1);
+                            self.emit(|| AuditEvent::BlueprintCompleted {
+                                steps: step + 1,
+                                reason: CompletionReason::Cancelled,
+                            });
+                            return Ok(state);
+                        }
                         Err(e) if attempt < self.max_retries => {
                             attempt += 1;
                             warn!(
@@ -604,21 +614,48 @@ impl Executor {
             runnables.push((name.clone(), node));
         }
 
-        // Run concurrently against a shared read-only view of the state.
-        // `try_join_all` preserves input order (so the merge below is
-        // deterministic) and short-circuits on the first error, dropping — and
-        // thereby cancelling — the sibling futures rather than letting expensive
-        // agent/script/human nodes run on after a peer has already failed.
+        // Run the frontier concurrently against a shared read-only view of the
+        // state, under a per-super-step child token. On the first hard failure we
+        // cancel that token so the sibling nodes stop promptly — killing their
+        // subprocesses / aborting their requests via the usual cancellation path,
+        // rather than orphaning them (merely dropping a future stops polling but
+        // doesn't signal cancellation). The child also cancels if the run-wide
+        // token does.
+        let child = cx.cancel.child_token();
+        let child_cx = cx.with_cancel(child.clone());
         let snapshot: &State = state;
-        let outcomes: Vec<(String, NodeKind, Update)> =
-            try_join_all(runnables.iter().map(|(name, node)| async move {
-                let update = node
-                    .run(snapshot, cx)
-                    .await
-                    .map_err(|e| e.context(format!("blueprint node `{name}` failed")))?;
-                anyhow::Ok((name.clone(), node.kind(), update))
-            }))
-            .await?;
+        // The first error to occur wins (secondary cancellation errors from the
+        // siblings we just cancelled are ignored), so the reported cause is the
+        // real one regardless of completion order.
+        let first_error: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
+        let results = join_all(runnables.iter().map(|(name, node)| {
+            let child = &child;
+            let child_cx = &child_cx;
+            let first_error = &first_error;
+            async move {
+                match node.run(snapshot, child_cx).await {
+                    Ok(update) => Some((name.clone(), node.kind(), update)),
+                    Err(e) => {
+                        let mut slot = first_error.lock().expect("first_error mutex poisoned");
+                        if slot.is_none() {
+                            *slot = Some(e.context(format!("blueprint node `{name}` failed")));
+                            child.cancel();
+                        }
+                        None
+                    }
+                }
+            }
+        }))
+        .await;
+
+        if let Some(e) = first_error
+            .into_inner()
+            .expect("first_error mutex poisoned")
+        {
+            return Err(e);
+        }
+        // No error: every future produced an update, in sorted-frontier order.
+        let outcomes: Vec<(String, NodeKind, Update)> = results.into_iter().flatten().collect();
 
         // Merge each node's update into the state. `vars` uses last-write-wins
         // (see `State::apply`); in a fan-out, results merge in sorted-frontier

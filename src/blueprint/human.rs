@@ -21,12 +21,32 @@ pub trait HumanInterface: Send + Sync {
 
 /// Default terminal implementation: writes the prompt to stderr (so it never
 /// pollutes piped stdout) and reads one line from stdin.
-pub struct StdioHuman;
+///
+/// The `BufReader` is created once and held for the whole run: a `read_line` may
+/// buffer bytes past the newline, so a fresh reader per prompt would discard any
+/// read-ahead and drop input when a blueprint has several `human` nodes.
+pub struct StdioHuman {
+    stdin: tokio::sync::Mutex<tokio::io::BufReader<tokio::io::Stdin>>,
+}
+
+impl Default for StdioHuman {
+    fn default() -> Self {
+        Self {
+            stdin: tokio::sync::Mutex::new(tokio::io::BufReader::new(tokio::io::stdin())),
+        }
+    }
+}
+
+impl StdioHuman {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 #[async_trait]
 impl HumanInterface for StdioHuman {
     async fn prompt(&self, prompt: &str, cancel: &CancellationToken) -> anyhow::Result<String> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
         let mut stderr = tokio::io::stderr();
         stderr
@@ -34,8 +54,8 @@ impl HumanInterface for StdioHuman {
             .await?;
         stderr.flush().await?;
 
+        let mut reader = self.stdin.lock().await;
         let mut line = String::new();
-        let mut reader = BufReader::new(tokio::io::stdin());
         let read = tokio::select! {
             _ = cancel.cancelled() => anyhow::bail!("human input cancelled"),
             result = reader.read_line(&mut line) => result?,

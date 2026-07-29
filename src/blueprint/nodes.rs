@@ -32,6 +32,25 @@ pub struct NodeCtx<'a> {
     pub cancel: CancellationToken,
 }
 
+impl<'a> NodeCtx<'a> {
+    /// Clone this context but with a different cancellation token — used to hand
+    /// the frontier nodes a per-super-step child token, so one node's failure can
+    /// cancel its siblings without touching the run-wide token.
+    pub fn with_cancel(&self, cancel: CancellationToken) -> NodeCtx<'a> {
+        NodeCtx {
+            provider: self.provider.clone(),
+            tools: self.tools,
+            audit: self.audit.clone(),
+            policy: self.policy,
+            system_prompt: self.system_prompt,
+            max_iterations: self.max_iterations,
+            compact_threshold: self.compact_threshold,
+            human: self.human.clone(),
+            cancel,
+        }
+    }
+}
+
 /// A single step in a blueprint graph.
 #[async_trait]
 pub trait Node: Send + Sync {
