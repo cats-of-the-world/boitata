@@ -127,21 +127,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
-name = "boitata"
+name = "boitata-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "boitata-core",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-test",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "boitata-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "boitata-agent",
+ "boitata-core",
+ "boitata-orchestrator",
+ "clap",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "boitata-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "clap",
- "futures",
  "libc",
  "regex",
  "reqwest 0.12.28",
  "rmcp",
  "serde",
  "serde_json",
- "serde_norway",
  "tempfile",
  "thiserror",
  "tiktoken-rs",
@@ -151,8 +180,27 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
- "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "boitata-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "boitata-agent",
+ "boitata-core",
+ "futures",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

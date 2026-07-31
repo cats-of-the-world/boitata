@@ -1,0 +1,21 @@
+[package]
+name = "boitata-agent"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+boitata-core = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tokio-stream = { workspace = true }
+tempfile = { workspace = true }

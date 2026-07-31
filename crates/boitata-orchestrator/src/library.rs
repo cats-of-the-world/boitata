@@ -16,22 +16,22 @@ use super::yaml::from_yaml;
 /// sources live under `blueprints/` and are compiled into the binary so the
 /// starters work with no files on disk.
 const STARTERS: &[(&str, &str)] = &[
-    ("default", include_str!("../../blueprints/default.yaml")),
+    ("default", include_str!("../blueprints/default.yaml")),
     (
         "fix_lint_errors",
-        include_str!("../../blueprints/fix_lint_errors.yaml"),
+        include_str!("../blueprints/fix_lint_errors.yaml"),
     ),
     (
         "fix_test_failure",
-        include_str!("../../blueprints/fix_test_failure.yaml"),
+        include_str!("../blueprints/fix_test_failure.yaml"),
     ),
     (
         "setup_devbox",
-        include_str!("../../blueprints/setup_devbox.yaml"),
+        include_str!("../blueprints/setup_devbox.yaml"),
     ),
     (
         "human_approval",
-        include_str!("../../blueprints/human_approval.yaml"),
+        include_str!("../blueprints/human_approval.yaml"),
     ),
 ];
 

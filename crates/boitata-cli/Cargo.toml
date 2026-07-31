@@ -1,0 +1,21 @@
+[package]
+name = "boitata-cli"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "boitata"
+path = "src/main.rs"
+
+[dependencies]
+boitata-core = { workspace = true }
+boitata-agent = { workspace = true }
+boitata-orchestrator = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }

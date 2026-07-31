@@ -1,5 +1,5 @@
 [workspace]
-members = []
+members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
@@ -65,43 +65,11 @@ rmcp = { version = "2.2.0", default-features = false, features = [
     "transport-streamable-http-client-reqwest",
 ] }
 
-[package]
-name = "boitata"
-version.workspace = true
-authors.workspace = true
-edition.workspace = true
-license.workspace = true
+# Internal crates
+boitata-core = { path = "crates/boitata-core" }
+boitata-agent = { path = "crates/boitata-agent" }
+boitata-orchestrator = { path = "crates/boitata-orchestrator" }
 
-[dependencies]
-tokio = { workspace = true }
-tokio-stream = { workspace = true }
-futures = { workspace = true }
-reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-clap = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-uuid = { workspace = true }
-async-trait = { workspace = true }
-toml = { workspace = true }
-serde_norway = { workspace = true }
-chrono = { workspace = true }
-rmcp = { workspace = true }
-tokio-util = { workspace = true }
-regex = { workspace = true }
-tiktoken-rs = { workspace = true }
-
-# Unix-only: process-group kill for timed-out commands.
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
-
-[dev-dependencies]
+# Dev-only
 tokio-test = "0.4"
 tempfile = "3"
-
-[[bin]]
-name = "boitata"
-path = "src/main.rs"
