@@ -14,10 +14,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::human::HumanInterface;
 use super::state::{State, Status, Update, render, render_shell};
-use crate::agent::{Agent, Task};
-use crate::audit::{AuditSink, NodeKind};
-use crate::provider::Provider;
-use crate::tools::{ToolPolicy, ToolRegistry, run_script};
+use boitata_agent::{Agent, Task};
+use boitata_core::audit::{AuditSink, NodeKind};
+use boitata_core::provider::Provider;
+use boitata_core::tools::{ToolPolicy, ToolRegistry, run_script};
 
 /// Shared, run-wide resources handed to every node.
 pub struct NodeCtx<'a> {

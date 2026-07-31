@@ -1,16 +1,6 @@
 // Boitata: One-Shot Coding Agent
 // Inspired by Stripe's Minions and Block's Goose
 
-// Declare modules
-mod agent;
-mod audit;
-mod blueprint;
-mod config;
-mod context;
-mod mcp;
-mod provider;
-mod tools;
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,17 +8,18 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use tracing::{info, warn};
 
-use agent::{Agent, Task};
-use audit::FileAuditLog;
-use config::{Config, McpServerConfig};
-use mcp::McpClient;
-use provider::{AnthropicProvider, OllamaProvider, OpenAIProvider, Provider};
-use tools::workspace;
-use tools::{
+use boitata_agent::{Agent, Task};
+use boitata_core::audit::{self, FileAuditLog};
+use boitata_core::config::{Config, McpServerConfig};
+use boitata_core::mcp::McpClient;
+use boitata_core::provider::{AnthropicProvider, OllamaProvider, OpenAIProvider, Provider};
+use boitata_core::tools::workspace;
+use boitata_core::tools::{
     CargoAddTool, CargoCheckTool, CargoClippyTool, CargoFmtTool, CargoTestTool, ExecuteCommandTool,
     FileEditTool, FileReadTool, FileWriteTool, GitBranchTool, GitCommitTool, GitDiffTool,
     GitStatusTool, ListDirectoryTool, SearchTool, ToolPolicy, ToolRegistry,
 };
+use boitata_orchestrator as blueprint;
 
 /// Fallback output-token budget when the config doesn't set `max_tokens`.
 const DEFAULT_MAX_TOKENS: usize = 4096;

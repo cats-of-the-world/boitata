@@ -1,15 +1,15 @@
 // Agent module: Core agent loop and orchestration
 
-use crate::audit::{AuditEvent, AuditSink};
-use crate::context::{
+use boitata_core::audit::{AuditEvent, AuditSink};
+use boitata_core::context::{
     Context, KEEP_RECENT_MESSAGES, SUMMARIZATION_SYSTEM_PROMPT, TokenCounter, apply_summary,
     needs_compaction, pick_cutoff, render_for_summary,
 };
-use crate::provider::{
+use boitata_core::provider::{
     CompletionRequest, Message, MessageContent, MessageRole, Provider, ProviderError, ToolCall,
     ToolDefinition,
 };
-use crate::tools::{Decision, ToolOutput, ToolPolicy, ToolRegistry};
+use boitata_core::tools::{Decision, ToolOutput, ToolPolicy, ToolRegistry};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -616,14 +616,15 @@ mod tests {
         async fn complete(
             &self,
             request: CompletionRequest,
-        ) -> crate::provider::ProviderResult<crate::provider::CompletionResponse> {
+        ) -> boitata_core::provider::ProviderResult<boitata_core::provider::CompletionResponse>
+        {
             use std::sync::atomic::Ordering;
 
             // The summarization call is the one carrying the summarization system
             // prompt and no tools.
             if request.system.as_deref() == Some(SUMMARIZATION_SYSTEM_PROMPT) {
                 self.summary_calls.fetch_add(1, Ordering::SeqCst);
-                return Ok(crate::provider::CompletionResponse {
+                return Ok(boitata_core::provider::CompletionResponse {
                     content: Some("compact synopsis".to_string()),
                     tool_calls: Vec::new(),
                     usage: None,
@@ -635,7 +636,7 @@ mod tests {
             if n < 5 {
                 // Grow the history with tool calls. The tool is unregistered, so
                 // it yields error results — which still enlarge the context.
-                Ok(crate::provider::CompletionResponse {
+                Ok(boitata_core::provider::CompletionResponse {
                     content: None,
                     tool_calls: vec![ToolCall {
                         id: format!("call-{n}"),
@@ -646,7 +647,7 @@ mod tests {
                     finish_reason: Some("tool_use".to_string()),
                 })
             } else {
-                Ok(crate::provider::CompletionResponse {
+                Ok(boitata_core::provider::CompletionResponse {
                     content: Some("all done".to_string()),
                     tool_calls: Vec::new(),
                     usage: None,
@@ -658,9 +659,9 @@ mod tests {
         async fn stream_complete(
             &self,
             _request: CompletionRequest,
-        ) -> crate::provider::ProviderResult<
+        ) -> boitata_core::provider::ProviderResult<
             tokio_stream::wrappers::ReceiverStream<
-                crate::provider::ProviderResult<crate::provider::Chunk>,
+                boitata_core::provider::ProviderResult<boitata_core::provider::Chunk>,
             >,
         > {
             let (_tx, rx) = tokio::sync::mpsc::channel(1);

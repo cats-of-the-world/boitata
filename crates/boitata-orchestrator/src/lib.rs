@@ -30,7 +30,7 @@
 // fan-out (a node with several successors) and fan-in (several predecessors of
 // one node collapse to a single run). The run ends when the frontier empties, or
 // at a step limit (`max_steps`, which bounds cyclic graphs). Ctrl-C cancels the
-// run, and each super-step emits audit events (see `crate::audit`).
+// run, and each super-step emits audit events (see `boitata_core::audit`).
 //
 // Blueprints are defined in YAML (see `yaml.rs`). A small starter library ships
 // embedded in the binary, and `--blueprint` also accepts a path to a user's own
@@ -57,9 +57,9 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::audit::{AuditEvent, AuditSink, CompletionReason, NodeKind, NodeStatus};
-use crate::provider::Provider;
-use crate::tools::{ToolPolicy, ToolRegistry};
+use boitata_core::audit::{AuditEvent, AuditSink, CompletionReason, NodeKind, NodeStatus};
+use boitata_core::provider::Provider;
+use boitata_core::tools::{ToolPolicy, ToolRegistry};
 
 /// Sentinel target that ends a blueprint run.
 pub const END: &str = "__end__";
@@ -700,9 +700,9 @@ impl Executor {
 mod tests {
     use super::state::Update;
     use super::*;
-    use crate::audit::NodeKind;
-    use crate::provider::{Chunk, CompletionRequest, CompletionResponse, ProviderResult};
     use async_trait::async_trait;
+    use boitata_core::audit::NodeKind;
+    use boitata_core::provider::{Chunk, CompletionRequest, CompletionResponse, ProviderResult};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // Minimal provider: never actually used because the test graphs use tool and
