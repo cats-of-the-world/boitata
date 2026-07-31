@@ -43,7 +43,7 @@ mod state;
 mod yaml;
 
 pub use human::{HumanInterface, StdioHuman};
-pub use library::load;
+pub use library::{load, starter_names};
 pub use state::{State, Status};
 
 use nodes::{Node, NodeCtx};

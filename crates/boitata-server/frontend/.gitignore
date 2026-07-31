@@ -1,0 +1,5 @@
+node_modules/
+# Built assets are produced by `npm run build` and embedded into the server
+# binary at compile time (build.rs creates the folder when absent), so they are
+# not committed.
+dist/
