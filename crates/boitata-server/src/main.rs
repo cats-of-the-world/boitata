@@ -87,7 +87,12 @@ async fn main() -> anyhow::Result<()> {
 /// in-flight requests before the process exits.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
+        // If the handler can't be installed, never resolve — otherwise this
+        // branch would fire immediately and shut the server down at startup.
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {}
+            Err(_) => std::future::pending::<()>().await,
+        }
     };
 
     #[cfg(unix)]

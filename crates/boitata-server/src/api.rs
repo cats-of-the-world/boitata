@@ -66,10 +66,11 @@ async fn create_run(
     // resolve arbitrary filesystem paths (`./x.yaml`, `/etc/…`), which would be a
     // path-traversal / local-file-inclusion vector for a networked server.
     if let Some(name) = &req.blueprint {
-        if !boitata_orchestrator::starter_names().contains(&name.as_str()) {
+        let starters = boitata_orchestrator::starter_names();
+        if !starters.contains(&name.as_str()) {
             return Err(ApiError::bad_request(format!(
                 "unknown blueprint `{name}` (built-ins: {})",
-                boitata_orchestrator::starter_names().join(", ")
+                starters.join(", ")
             )));
         }
     }
@@ -110,9 +111,15 @@ struct FinishGuard {
 impl Drop for FinishGuard {
     fn drop(&mut self) {
         if !self.recorded {
-            *self.handle.status.write().unwrap() = RunStatus::Failed {
-                error: Some("run task panicked".into()),
-            };
+            // Best-effort and panic-proof: this runs on the run task's unwind
+            // path, so it must never `unwrap()` a (possibly poisoned) lock and
+            // double-panic — that would abort the process. Skipping the status
+            // write is acceptable; `finished` still fires below so SSE closes.
+            if let Ok(mut status) = self.handle.status.write() {
+                *status = RunStatus::Failed {
+                    error: Some("run task panicked".into()),
+                };
+            }
             tracing::error!(id = %self.handle.id, "run task panicked");
         }
         self.handle.finished.cancel();

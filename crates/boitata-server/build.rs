@@ -11,7 +11,11 @@ use std::path::Path;
 fn main() {
     let dist = Path::new("frontend/dist");
     if !dist.exists() {
-        let _ = std::fs::create_dir_all(dist);
+        if let Err(e) = std::fs::create_dir_all(dist) {
+            // Surface the real cause; otherwise RustEmbed fails later with an
+            // opaque "folder does not exist" error.
+            println!("cargo:warning=could not create {}: {e}", dist.display());
+        }
     }
     // Re-embed when the built assets change.
     println!("cargo:rerun-if-changed=frontend/dist");

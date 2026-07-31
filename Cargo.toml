@@ -65,9 +65,8 @@ rmcp = { version = "2.2.0", default-features = false, features = [
     "transport-streamable-http-client-reqwest",
 ] }
 
-# HTTP server (boitata-server): axum + tower's ServiceExt (test-only)
+# HTTP server (boitata-server)
 axum = { version = "0.8", features = ["macros"] }
-tower = "0.5"
 # Embed the built web UI into the server binary
 rust-embed = "8"
 mime_guess = "2"
@@ -79,6 +78,8 @@ boitata-core = { path = "crates/boitata-core" }
 boitata-agent = { path = "crates/boitata-agent" }
 boitata-orchestrator = { path = "crates/boitata-orchestrator" }
 
-# Dev-only
+# Dev-only (shared)
 tokio-test = "0.4"
 tempfile = "3"
+# tower's ServiceExt drives the axum router in boitata-server's handler tests.
+tower = "0.5"

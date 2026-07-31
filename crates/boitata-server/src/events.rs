@@ -60,10 +60,12 @@ impl AuditSink for ChannelAuditSink {
     fn record(&self, event: AuditEvent) {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let ev = RunEvent { seq, event };
-        // Best-effort: a poisoned lock or a send with no live subscribers must
-        // never break the run.
+        // Clone for the history copy outside the lock so the critical section is
+        // just the push/trim. Best-effort: a poisoned lock or a send with no live
+        // subscribers must never break the run.
+        let for_history = ev.clone();
         if let Ok(mut history) = self.history.lock() {
-            history.push(ev.clone());
+            history.push(for_history);
             if history.len() > MAX_HISTORY + TRIM_BATCH {
                 history.drain(0..TRIM_BATCH);
             }
