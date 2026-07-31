@@ -35,3 +35,16 @@ hot-reload, run `npm run dev` in `frontend/` (it proxies `/api` to `:8787`).
 
 Runs are held in memory (v1); restarting the server forgets history.
 Human-in-the-loop blueprint nodes are not yet supported over the web.
+
+## Scheduling from the CLI
+
+The `boitata` CLI can schedule a task on a running server instead of executing
+locally, streaming the same events to your terminal:
+
+```bash
+boitata run "fix the failing test" --remote http://127.0.0.1:8787
+boitata run "tidy imports" --blueprint default --remote http://127.0.0.1:8787
+```
+
+It POSTs to `/api/runs`, tails `/api/runs/{id}/events`, prints the result, exits
+non-zero if the run failed, and cancels the run on Ctrl-C.

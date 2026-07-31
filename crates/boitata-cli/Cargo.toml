@@ -19,3 +19,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+
+# --remote: schedule a task on a boitata-server and tail its SSE stream
+reqwest = { workspace = true }
+eventsource-stream = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
