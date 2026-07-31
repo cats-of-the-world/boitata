@@ -1,6 +1,8 @@
 // Boitata: One-Shot Coding Agent
 // Inspired by Stripe's Minions and Block's Goose
 
+mod remote;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -39,6 +41,10 @@ enum Commands {
         /// Use a specific blueprint
         #[arg(long)]
         blueprint: Option<String>,
+        /// Schedule the task on a running boitata-server and stream its progress,
+        /// e.g. --remote http://127.0.0.1:8787 (instead of running locally)
+        #[arg(long)]
+        remote: Option<String>,
     },
     /// Create a new task
     TaskCreate {
@@ -70,7 +76,11 @@ async fn main() -> anyhow::Result<()> {
             task,
             config,
             blueprint,
-        } => run_task(task, config, blueprint).await,
+            remote,
+        } => match remote {
+            Some(url) => remote::run(&url, task, blueprint).await,
+            None => run_task(task, config, blueprint).await,
+        },
         Commands::TaskCreate { description } => {
             info!("Creating task: {}", description);
             println!("Task creation not yet implemented");
