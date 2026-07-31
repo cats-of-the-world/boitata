@@ -1,0 +1,53 @@
+name: Deploy Docs
+
+# Builds the mdBook in docs/ and publishes it to GitHub Pages.
+# Triggers on changes to the book (docs/, README.md, book config) or manually.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "docs/**"
+      - "README.md"
+      - ".github/workflows/deploy-docs.yml"
+  workflow_dispatch:
+
+# `actions/deploy-pages` needs a writable Pages token and OIDC for the deploy.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Cancel any in-flight deploy for the same ref so only the latest lands.
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build & deploy book
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08 # v2.0.0
+        with:
+          mdbook-version: "0.4.25"
+
+      - name: Build the book
+        run: mdbook build docs/
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: docs/book
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
