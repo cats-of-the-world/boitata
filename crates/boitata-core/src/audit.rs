@@ -126,6 +126,8 @@ pub enum NodeKind {
     Tool,
     Script,
     Human,
+    /// A container-provisioning step (create / checkout / exec).
+    Container,
 }
 
 /// Outcome of a blueprint node.

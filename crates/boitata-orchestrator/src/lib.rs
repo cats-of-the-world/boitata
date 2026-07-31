@@ -36,6 +36,7 @@
 // embedded in the binary, and `--blueprint` also accepts a path to a user's own
 // YAML file (see `library.rs`).
 
+mod container;
 mod human;
 mod library;
 mod nodes;
@@ -46,6 +47,7 @@ pub use human::{HumanInterface, StdioHuman};
 pub use library::{load, starter_names};
 pub use state::{State, Status};
 
+use container::Containers;
 use nodes::{Node, NodeCtx};
 use state::Update;
 use std::collections::HashMap;
@@ -380,7 +382,7 @@ impl Executor {
     /// Build the per-run node context that borrows this executor's shared
     /// resources and agent-node configuration. Centralized so adding a field to
     /// both `Executor` and `NodeCtx` has a single mapping site.
-    fn node_ctx(&self, cancel: CancellationToken) -> NodeCtx<'_> {
+    fn node_ctx(&self, cancel: CancellationToken, containers: Arc<Containers>) -> NodeCtx<'_> {
         NodeCtx {
             provider: self.provider.clone(),
             tools: &self.tools,
@@ -390,6 +392,7 @@ impl Executor {
             max_iterations: self.max_iterations,
             compact_threshold: self.compact_threshold,
             human: self.human.clone(),
+            containers,
             cancel,
         }
     }
@@ -412,12 +415,31 @@ impl Executor {
         self.run_with_cancel(graph, task, cancel).await
     }
 
-    /// Run `graph` under an external cancellation token.
+    /// Run `graph` under an external cancellation token. Every container the run
+    /// provisions is destroyed when it ends, for any reason (success, a failing
+    /// step, a hard error, or cancellation).
     pub async fn run_with_cancel(
         &self,
         graph: &Graph,
         task: String,
         cancel: CancellationToken,
+    ) -> anyhow::Result<State> {
+        let containers = Arc::new(Containers::new());
+        let result = self
+            .run_graph(graph, task, cancel, containers.clone())
+            .await;
+        containers.cleanup_all().await;
+        result
+    }
+
+    /// The graph-execution core. `run_with_cancel` wraps this to guarantee
+    /// container cleanup regardless of how it returns.
+    async fn run_graph(
+        &self,
+        graph: &Graph,
+        task: String,
+        cancel: CancellationToken,
+        containers: Arc<Containers>,
     ) -> anyhow::Result<State> {
         // A zero step budget can't run anything; report it as the configuration
         // error it is rather than a misleading "step limit exceeded".
@@ -434,7 +456,7 @@ impl Executor {
         });
 
         let mut state = State::new(task);
-        let cx = self.node_ctx(cancel.clone());
+        let cx = self.node_ctx(cancel.clone(), containers);
 
         // The run advances in super-steps: each super-step runs the whole
         // frontier (the active node set) concurrently, merges their updates, then

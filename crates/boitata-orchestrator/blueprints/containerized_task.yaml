@@ -1,0 +1,28 @@
+# Run a task inside an ephemeral container: provision a container, git-clone the
+# repo given as {task} into it, and run its tests there — a stand-in for
+# delegating to an in-container agent. The container is destroyed automatically
+# when the run ends (success, failure, or cancel).
+#
+# {task} must be a git repo URL. The image must ship git and the toolchain the
+# `run` step needs. Requires a running Docker daemon.
+name: containerized_task
+entry: provision
+nodes:
+  provision:
+    type: provision
+    image: "rust:latest"
+  clone:
+    type: checkout
+    container: "{provision}"
+    repo: "{task}"
+    path: /workspace
+  test:
+    type: exec
+    container: "{provision}"
+    workdir: /workspace
+    run: "cargo test"
+edges:
+  - { from: provision, to: clone }
+  - { from: clone, when: success, to: test }
+  - { from: clone, when: failure, to: END }
+  - { from: test, to: END }

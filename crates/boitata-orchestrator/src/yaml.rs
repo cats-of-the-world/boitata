@@ -26,6 +26,7 @@ use anyhow::{Context, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::container::{CheckoutNode, ExecNode, ProvisionNode};
 use super::nodes::{AgentNode, HumanMode, HumanNode, ScriptNode, ToolNode};
 use super::state::Status;
 use super::{END, Graph, GraphBuilder};
@@ -66,6 +67,26 @@ enum NodeDef {
         prompt: String,
         #[serde(default)]
         mode: HumanMode,
+    },
+    /// Create an ephemeral container from `image`. Its output (the container id)
+    /// is stored under the node name for downstream `{name}` references.
+    Provision { image: String },
+    /// Git-clone `repo` into `container` (a `{node}` reference to a provision
+    /// node). `ref` and `path` are optional (`path` defaults to `/workspace`).
+    Checkout {
+        container: String,
+        repo: String,
+        #[serde(default, rename = "ref")]
+        git_ref: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// Run a shell command inside `container`, routing on its exit code.
+    Exec {
+        container: String,
+        run: String,
+        #[serde(default)]
+        workdir: Option<String>,
     },
 }
 
@@ -120,6 +141,18 @@ fn add_node(builder: GraphBuilder, name: String, node: NodeDef) -> GraphBuilder 
         NodeDef::Tool { tool, args } => builder.node(ToolNode::new(name, tool, args)),
         NodeDef::Script { run } => builder.node(ScriptNode::new(name, run)),
         NodeDef::Human { prompt, mode } => builder.node(HumanNode::new(name, prompt, mode)),
+        NodeDef::Provision { image } => builder.node(ProvisionNode::new(name, image)),
+        NodeDef::Checkout {
+            container,
+            repo,
+            git_ref,
+            path,
+        } => builder.node(CheckoutNode::new(name, container, repo, git_ref, path)),
+        NodeDef::Exec {
+            container,
+            run,
+            workdir,
+        } => builder.node(ExecNode::new(name, container, run, workdir)),
     }
 }
 
@@ -469,5 +502,31 @@ nodes:
     fn rejects_invalid_yaml() {
         let err = from_yaml("not: [a blueprint").err().unwrap().to_string();
         assert!(err.contains("parse blueprint YAML"), "{err}");
+    }
+
+    #[test]
+    fn parses_container_nodes() {
+        // Exercises the provision/checkout/exec variants, the `ref` field rename,
+        // and the optional `path`/`workdir`/`ref` defaults.
+        let src = r#"
+name: c
+entry: box
+nodes:
+  box:   {type: provision, image: "rust:latest"}
+  clone: {type: checkout, container: "{box}", repo: "{task}", ref: main}
+  test:  {type: exec, container: "{box}", run: "cargo test", workdir: /workspace}
+edges:
+  - {from: box, to: clone}
+  - {from: clone, when: success, to: test}
+  - {from: clone, when: failure, to: END}
+  - {from: test, to: END}
+"#;
+        let graph = from_yaml(src).expect("valid container blueprint");
+        assert_eq!(graph.route_for_test("box"), ["clone"]);
+        assert_eq!(
+            graph.route_with_status_for_test("clone", Some(Status::Ok)),
+            ["test"]
+        );
+        assert_eq!(graph.route_for_test("test"), [END]);
     }
 }

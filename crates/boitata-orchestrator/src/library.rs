@@ -33,6 +33,10 @@ const STARTERS: &[(&str, &str)] = &[
         "human_approval",
         include_str!("../blueprints/human_approval.yaml"),
     ),
+    (
+        "containerized_task",
+        include_str!("../blueprints/containerized_task.yaml"),
+    ),
 ];
 
 /// Names of the built-in starter blueprints, for help and error messages.
