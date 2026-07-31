@@ -62,11 +62,16 @@ async fn create_run(
     if req.task.trim().is_empty() {
         return Err(ApiError::bad_request("task must not be empty"));
     }
-    // Resolve the blueprint now so a bad name fails the request rather than a
-    // silently-broken background run.
+    // Only accept built-in starter names over the network. `load` would also
+    // resolve arbitrary filesystem paths (`./x.yaml`, `/etc/…`), which would be a
+    // path-traversal / local-file-inclusion vector for a networked server.
     if let Some(name) = &req.blueprint {
-        boitata_orchestrator::load(name)
-            .map_err(|e| ApiError::bad_request(format!("invalid blueprint: {e:#}")))?;
+        if !boitata_orchestrator::starter_names().contains(&name.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "unknown blueprint `{name}` (built-ins: {})",
+                boitata_orchestrator::starter_names().join(", ")
+            )));
+        }
     }
 
     let id = Uuid::new_v4();
@@ -84,7 +89,7 @@ async fn create_run(
         tx,
         history,
     });
-    app.runs.write().unwrap().insert(id, handle.clone());
+    app.register_run(handle.clone());
     info!(%id, blueprint = ?req.blueprint, "run started");
 
     tokio::spawn(run_job(app.clone(), handle, req.task, req.blueprint));
@@ -92,10 +97,37 @@ async fn create_run(
     Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))))
 }
 
+/// Guarantees a run always reaches a terminal state. Its `Drop` fires
+/// `finished` (so SSE streams close) and, if the run task panicked before
+/// recording an outcome, marks the run `Failed` instead of leaving it stuck on
+/// `Running` forever. On the normal path `disarm` is called after the status is
+/// written, so `Drop` only cancels `finished`.
+struct FinishGuard {
+    handle: Arc<RunHandle>,
+    recorded: bool,
+}
+
+impl Drop for FinishGuard {
+    fn drop(&mut self) {
+        if !self.recorded {
+            *self.handle.status.write().unwrap() = RunStatus::Failed {
+                error: Some("run task panicked".into()),
+            };
+            tracing::error!(id = %self.handle.id, "run task panicked");
+        }
+        self.handle.finished.cancel();
+    }
+}
+
 /// The background task: assemble an agent or executor with a [`ChannelAuditSink`],
-/// run it under the handle's cancel token, then record the outcome and signal
-/// `finished` so the SSE stream can close.
+/// run it under the handle's cancel token, then record the outcome. A
+/// [`FinishGuard`] ensures `finished` fires and the status leaves `Running` even
+/// if the run panics.
 async fn run_job(app: AppState, handle: Arc<RunHandle>, task: String, blueprint: Option<String>) {
+    let mut guard = FinishGuard {
+        handle: handle.clone(),
+        recorded: false,
+    };
     let sink = Arc::new(ChannelAuditSink::new(
         handle.tx.clone(),
         handle.history.clone(),
@@ -122,7 +154,7 @@ async fn run_job(app: AppState, handle: Arc<RunHandle>, task: String, blueprint:
         *handle.result.write().unwrap() = Some(result);
     }
     *handle.status.write().unwrap() = status;
-    handle.finished.cancel();
+    guard.recorded = true; // outcome recorded; Drop now only cancels `finished`
     info!(id = %handle.id, "run finished");
 }
 

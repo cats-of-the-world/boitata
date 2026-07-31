@@ -14,11 +14,17 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.listBlueprints().then(setBlueprints).catch(() => {});
+    api
+      .listBlueprints()
+      .then(setBlueprints)
+      .catch((e) => console.error("failed to load blueprints", e));
   }, []);
 
   const refreshRuns = useCallback(() => {
-    api.listRuns().then(setRuns).catch(() => {});
+    api
+      .listRuns()
+      .then(setRuns)
+      .catch((e) => console.error("failed to refresh runs", e));
   }, []);
 
   // Poll the run list so statuses stay fresh while runs are in flight.
@@ -166,7 +172,12 @@ function RunView({ id, onChange }: { id: string; onChange: () => void }) {
       onChange();
     };
 
+    // Consecutive reconnect failures; reset whenever a message arrives so only a
+    // sustained outage (not occasional blips over a long run) trips the cap.
+    let errors = 0;
+    const maxErrors = 5;
     es.onmessage = (msg) => {
+      errors = 0;
       let ev: RunEvent;
       try {
         ev = JSON.parse(msg.data) as RunEvent;
@@ -182,8 +193,6 @@ function RunView({ id, onChange }: { id: string; onChange: () => void }) {
     // blip, but the server also closes the stream when the run ends — so on each
     // error, fetch the final state and stop once the run is no longer running.
     // Cap consecutive failures so a persistent error can't loop forever.
-    let errors = 0;
-    const maxErrors = 5;
     es.onerror = () => {
       if (++errors > maxErrors) {
         finish();
@@ -204,8 +213,14 @@ function RunView({ id, onChange }: { id: string; onChange: () => void }) {
     };
   }, [id, push, onChange]);
 
+  // Follow the tail only when the user is already near the bottom, so scrolling
+  // up to read earlier entries isn't interrupted by new events.
   useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+    const el = logRef.current;
+    if (!el) return;
+    const nearBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (nearBottom) el.scrollTo({ top: el.scrollHeight });
   }, [events]);
 
   const status = detail?.status.state ?? "running";

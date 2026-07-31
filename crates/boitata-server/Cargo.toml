@@ -15,8 +15,6 @@ boitata-agent = { workspace = true }
 boitata-orchestrator = { workspace = true }
 
 axum = { workspace = true }
-tower = { workspace = true }
-tower-http = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }

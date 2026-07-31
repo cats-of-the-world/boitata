@@ -49,26 +49,40 @@ export interface RunDetail extends RunSummary {
   events: RunEvent[];
 }
 
-async function json<T>(res: Response): Promise<T> {
+// Throw a consistent Error for any non-2xx response, preferring the server's
+// `{ error }` body when present. Used by both JSON and empty-body endpoints.
+async function assertOk(res: Response): Promise<Response> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
   }
+  return res;
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  const res = await assertOk(await fetch(url));
   return res.json() as Promise<T>;
 }
 
+// Runs are keyed by server-issued UUIDs, but encode defensively so a path
+// segment can never be crafted from an id.
+const run = (id: string) => `/api/runs/${encodeURIComponent(id)}`;
+
 export const api = {
-  listBlueprints: () => fetch("/api/blueprints").then((r) => json<string[]>(r)),
-  listRuns: () => fetch("/api/runs").then((r) => json<RunSummary[]>(r)),
-  getRun: (id: string) => fetch(`/api/runs/${id}`).then((r) => json<RunDetail>(r)),
-  startRun: (task: string, blueprint: string | null) =>
-    fetch("/api/runs", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ task, blueprint: blueprint || undefined }),
-    }).then((r) => json<{ id: string }>(r)),
-  cancelRun: (id: string) =>
-    fetch(`/api/runs/${id}/cancel`, { method: "POST" }).then((r) => {
-      if (!r.ok) throw new Error(`cancel failed: HTTP ${r.status}`);
-    }),
+  listBlueprints: () => getJson<string[]>("/api/blueprints"),
+  listRuns: () => getJson<RunSummary[]>("/api/runs"),
+  getRun: (id: string) => getJson<RunDetail>(run(id)),
+  startRun: async (task: string, blueprint: string | null) => {
+    const res = await assertOk(
+      await fetch("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task, blueprint: blueprint || undefined }),
+      }),
+    );
+    return res.json() as Promise<{ id: string }>;
+  },
+  cancelRun: async (id: string) => {
+    await assertOk(await fetch(`${run(id)}/cancel`, { method: "POST" }));
+  },
 };

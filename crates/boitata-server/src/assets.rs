@@ -36,8 +36,20 @@ pub async fn static_handler(uri: Uri) -> Response {
 
 fn serve(path: &str, content: rust_embed::EmbeddedFile) -> Response {
     let mime = mime_guess::from_path(path).first_or_octet_stream();
+    // Vite emits content-hashed filenames under `assets/`, so those are safe to
+    // cache forever. `index.html` (also the SPA fallback) references those hashed
+    // names, so it must always be revalidated or a stale shell will point at
+    // assets that no longer exist after a rebuild.
+    let cache_control = if path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
     (
-        [(header::CONTENT_TYPE, mime.as_ref())],
+        [
+            (header::CONTENT_TYPE, mime.as_ref()),
+            (header::CACHE_CONTROL, cache_control),
+        ],
         Body::from(content.data.into_owned()),
     )
         .into_response()

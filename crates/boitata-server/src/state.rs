@@ -53,7 +53,30 @@ impl AppState {
     pub fn get_run(&self, id: Uuid) -> Option<Arc<RunHandle>> {
         self.runs.read().unwrap().get(&id).cloned()
     }
+
+    /// Register a run, evicting the oldest *finished* runs once the registry
+    /// exceeds [`MAX_RUNS`] so a long-lived server's memory stays bounded.
+    /// In-flight runs are never evicted. (v1 is in-memory only; the target model
+    /// moves execution into ephemeral containers and replaces this registry.)
+    pub fn register_run(&self, handle: Arc<RunHandle>) {
+        let mut runs = self.runs.write().unwrap();
+        runs.insert(handle.id, handle);
+        if runs.len() > MAX_RUNS {
+            let mut finished: Vec<(Uuid, DateTime<Utc>)> = runs
+                .values()
+                .filter(|h| !matches!(*h.status.read().unwrap(), RunStatus::Running))
+                .map(|h| (h.id, h.started_at))
+                .collect();
+            finished.sort_by_key(|&(_, started)| started); // oldest first
+            for (id, _) in finished.into_iter().take(runs.len() - MAX_RUNS) {
+                runs.remove(&id);
+            }
+        }
+    }
 }
+
+/// Upper bound on retained runs before finished ones are evicted oldest-first.
+const MAX_RUNS: usize = 1000;
 
 /// Lifecycle state of a run, tagged for JSON (`{"state": "running"}`).
 #[derive(Debug, Clone, Serialize)]

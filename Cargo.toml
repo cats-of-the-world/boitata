@@ -65,10 +65,9 @@ rmcp = { version = "2.2.0", default-features = false, features = [
     "transport-streamable-http-client-reqwest",
 ] }
 
-# HTTP server (boitata-server): axum + tower middleware
+# HTTP server (boitata-server): axum + tower's ServiceExt (test-only)
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
 # Embed the built web UI into the server binary
 rust-embed = "8"
 mime_guess = "2"

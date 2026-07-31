@@ -62,6 +62,19 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&args.addr)
         .await
         .with_context(|| format!("failed to bind {}", args.addr))?;
+    // The server has no auth and drives an agent with shell/file/git tools, so
+    // binding to a non-loopback address exposes it to the whole network.
+    if !listener
+        .local_addr()
+        .map(|a| a.ip().is_loopback())
+        .unwrap_or(false)
+    {
+        tracing::warn!(
+            "listening on non-loopback address {} — there is no authentication; \
+             put it behind a trusted network or an authenticating reverse proxy",
+            args.addr
+        );
+    }
     info!("boitata-server listening on http://{}", args.addr);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -69,10 +82,30 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolve on Ctrl-C (SIGINT) so `axum::serve` stops accepting connections and
-/// drains in-flight requests before the process exits.
+/// Resolve on Ctrl-C (SIGINT) or, on Unix, SIGTERM — the signal container
+/// runtimes send — so `axum::serve` stops accepting connections and drains
+/// in-flight requests before the process exits.
 async fn shutdown_signal() {
-    if tokio::signal::ctrl_c().await.is_ok() {
-        info!("shutdown signal received; draining connections");
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            // If we can't install the handler, never resolve this branch.
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
     }
+    info!("shutdown signal received; draining connections");
 }
