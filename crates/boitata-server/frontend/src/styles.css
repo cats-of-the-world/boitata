@@ -9,7 +9,6 @@
   --ok: #4ec9a5;
   --err: #e5635b;
   --info: #5aa2f0;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -18,6 +17,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 .app { height: 100vh; display: flex; flex-direction: column; }

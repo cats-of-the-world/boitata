@@ -185,7 +185,7 @@ async fn list_runs(State(app): State<AppState>) -> Json<Vec<RunSummary>> {
         .values()
         .map(|h| h.summary())
         .collect();
-    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     Json(runs)
 }
 
@@ -276,9 +276,12 @@ async fn run_events(
 }
 
 fn to_sse(ev: &crate::events::RunEvent) -> Event {
-    Event::default()
-        .json_data(ev)
-        .unwrap_or_else(|_| Event::default().data("{}"))
+    Event::default().json_data(ev).unwrap_or_else(|e| {
+        // A serialization failure means a bug in an event payload; surface it in
+        // logs rather than silently shipping an empty frame to the client.
+        tracing::warn!("failed to serialize run event (seq {}): {e}", ev.seq);
+        Event::default().data("{}")
+    })
 }
 
 /// A small JSON error response.

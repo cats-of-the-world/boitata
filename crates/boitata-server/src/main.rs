@@ -63,6 +63,16 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind {}", args.addr))?;
     info!("boitata-server listening on http://{}", args.addr);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+/// Resolve on Ctrl-C (SIGINT) so `axum::serve` stops accepting connections and
+/// drains in-flight requests before the process exits.
+async fn shutdown_signal() {
+    if tokio::signal::ctrl_c().await.is_ok() {
+        info!("shutdown signal received; draining connections");
+    }
 }

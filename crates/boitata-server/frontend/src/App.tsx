@@ -140,6 +140,7 @@ function RunList({
 function RunView({ id, onChange }: { id: string; onChange: () => void }) {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [detail, setDetail] = useState<RunDetail | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const seen = useRef<Set<number>>(new Set());
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -166,15 +167,28 @@ function RunView({ id, onChange }: { id: string; onChange: () => void }) {
     };
 
     es.onmessage = (msg) => {
-      const ev = JSON.parse(msg.data) as RunEvent;
+      let ev: RunEvent;
+      try {
+        ev = JSON.parse(msg.data) as RunEvent;
+      } catch {
+        return; // skip a malformed/partial frame rather than break the stream
+      }
       push(ev);
       if (ev.event === "run_completed" || ev.event === "blueprint_completed") {
         finish();
       }
     };
-    // Stream closed by the server (run finished) or a transient error: fetch the
-    // final state; if the run is no longer running, stop reconnecting.
+    // EventSource auto-reconnects on error. That's what we want for a transient
+    // blip, but the server also closes the stream when the run ends — so on each
+    // error, fetch the final state and stop once the run is no longer running.
+    // Cap consecutive failures so a persistent error can't loop forever.
+    let errors = 0;
+    const maxErrors = 5;
     es.onerror = () => {
+      if (++errors > maxErrors) {
+        finish();
+        return;
+      }
       api
         .getRun(id)
         .then((d) => {
@@ -203,11 +217,20 @@ function RunView({ id, onChange }: { id: string; onChange: () => void }) {
         <span className={`dot ${status}`} />
         <strong>{status}</strong>
         {status === "running" && (
-          <button className="cancel" onClick={() => api.cancelRun(id)}>
+          <button
+            className="cancel"
+            onClick={() =>
+              api
+                .cancelRun(id)
+                .then(() => setActionError(null))
+                .catch((e) => setActionError(String(e)))
+            }
+          >
             Cancel
           </button>
         )}
       </div>
+      {actionError && <div className="error">{actionError}</div>}
       <div className="log" ref={logRef}>
         {events.map((ev) => (
           <EventLine key={ev.seq} ev={ev} />
@@ -259,6 +282,8 @@ function formatEvent(ev: RunEvent): {
     case "run_started":
       return { icon: "▶", text: `run started · ${s("provider")}/${s("model")}`, cls: "info" };
     case "llm_response": {
+      // On the `llm_response` audit event `tool_calls` is a list of tool *names*
+      // (Vec<String>), not the ToolCall objects carried by a run's result.
       const tools = (ev.tool_calls as string[] | undefined) ?? [];
       const suffix = tools.length ? ` · tools: ${tools.join(", ")}` : "";
       return { icon: "🧠", text: `iteration ${s("iteration")}${suffix}`, cls: "info" };

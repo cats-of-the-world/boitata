@@ -68,5 +68,7 @@ export const api = {
       body: JSON.stringify({ task, blueprint: blueprint || undefined }),
     }).then((r) => json<{ id: string }>(r)),
   cancelRun: (id: string) =>
-    fetch(`/api/runs/${id}/cancel`, { method: "POST" }),
+    fetch(`/api/runs/${id}/cancel`, { method: "POST" }).then((r) => {
+      if (!r.ok) throw new Error(`cancel failed: HTTP ${r.status}`);
+    }),
 };

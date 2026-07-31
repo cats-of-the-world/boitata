@@ -28,6 +28,15 @@ pub struct RunEvent {
 /// subscriber (or the run-detail endpoint) replays this before going live.
 pub type History = Arc<Mutex<Vec<RunEvent>>>;
 
+/// Cap on the replayable history buffer. A long, tool-heavy run can emit a large
+/// number of events; we keep the buffer bounded so memory (and the clone on the
+/// request path) stays bounded. The oldest events are dropped in batches once the
+/// buffer exceeds `MAX_HISTORY + TRIM_BATCH`, amortising the trim to O(1) per
+/// event. The complete outcome lives in the run's `RunResult`, so trimming only
+/// affects the live event log, never the final transcript.
+const MAX_HISTORY: usize = 10_000;
+const TRIM_BATCH: usize = 2_000;
+
 /// An [`AuditSink`] that fans events out to SSE subscribers and records them for
 /// replay. Cloneable handles to `tx`/`history` are shared with the [`RunHandle`]
 /// so the API can subscribe and serve history independently of the sink.
@@ -55,6 +64,9 @@ impl AuditSink for ChannelAuditSink {
         // never break the run.
         if let Ok(mut history) = self.history.lock() {
             history.push(ev.clone());
+            if history.len() > MAX_HISTORY + TRIM_BATCH {
+                history.drain(0..TRIM_BATCH);
+            }
         }
         let _ = self.tx.send(ev);
     }
@@ -96,6 +108,23 @@ mod tests {
 
         let ev = rx.recv().await.expect("event delivered");
         assert_eq!(ev.seq, 0);
+    }
+
+    #[test]
+    fn history_is_bounded_and_keeps_newest() {
+        let (tx, _keep) = broadcast::channel(8);
+        let history: History = Arc::new(Mutex::new(Vec::new()));
+        let sink = ChannelAuditSink::new(tx, history.clone());
+
+        let total = MAX_HISTORY + TRIM_BATCH + 500;
+        for _ in 0..total {
+            sink.record(run_started());
+        }
+
+        let buf = history.lock().unwrap();
+        assert!(buf.len() <= MAX_HISTORY + TRIM_BATCH, "buffer not bounded");
+        // Oldest events were trimmed; the last recorded seq is retained.
+        assert_eq!(buf.last().unwrap().seq, (total - 1) as u64);
     }
 
     #[test]
