@@ -82,12 +82,15 @@ impl Containers {
             .create_container(None, body)
             .await
             .with_context(|| format!("failed to create container from `{image}`"))?;
+        // Record the id the moment the container exists — before starting it — so
+        // a `start_container` failure can't leave an orphan that `cleanup_all`
+        // never sees.
+        self.provisioned.lock().await.push(created.id.clone());
         docker
             .start_container(&created.id, None)
             .await
             .with_context(|| format!("failed to start container {}", created.id))?;
 
-        self.provisioned.lock().await.push(created.id.clone());
         Ok(created.id)
     }
 

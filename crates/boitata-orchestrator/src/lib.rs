@@ -53,7 +53,9 @@ use state::Update;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use futures::future::join_all;
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -416,8 +418,8 @@ impl Executor {
     }
 
     /// Run `graph` under an external cancellation token. Every container the run
-    /// provisions is destroyed when it ends, for any reason (success, a failing
-    /// step, a hard error, or cancellation).
+    /// provisions is destroyed when it ends, for any reason — success, a failing
+    /// step, a hard error, cancellation, or even a panic in a node's `run`.
     pub async fn run_with_cancel(
         &self,
         graph: &Graph,
@@ -425,11 +427,17 @@ impl Executor {
         cancel: CancellationToken,
     ) -> anyhow::Result<State> {
         let containers = Arc::new(Containers::new());
-        let result = self
-            .run_graph(graph, task, cancel, containers.clone())
+        // Catch a panic in the graph loop so cleanup still runs, then re-raise it.
+        // The container ids are recorded on `containers` as they're provisioned,
+        // so `cleanup_all` covers them regardless of where the panic happened.
+        let result = AssertUnwindSafe(self.run_graph(graph, task, cancel, &containers))
+            .catch_unwind()
             .await;
         containers.cleanup_all().await;
-        result
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     /// The graph-execution core. `run_with_cancel` wraps this to guarantee
@@ -439,7 +447,7 @@ impl Executor {
         graph: &Graph,
         task: String,
         cancel: CancellationToken,
-        containers: Arc<Containers>,
+        containers: &Arc<Containers>,
     ) -> anyhow::Result<State> {
         // A zero step budget can't run anything; report it as the configuration
         // error it is rather than a misleading "step limit exceeded".
@@ -456,7 +464,7 @@ impl Executor {
         });
 
         let mut state = State::new(task);
-        let cx = self.node_ctx(cancel.clone(), containers);
+        let cx = self.node_ctx(cancel.clone(), containers.clone());
 
         // The run advances in super-steps: each super-step runs the whole
         // frontier (the active node set) concurrently, merges their updates, then
