@@ -1,174 +1,21 @@
-//! Container-provisioning nodes and the per-run container manager.
+//! Sandbox-provisioning nodes.
 //!
-//! These nodes let a blueprint move execution off the host into an ephemeral
-//! Docker container: [`ProvisionNode`] creates one, [`CheckoutNode`] git-clones a
-//! repo into it, and [`ExecNode`] runs commands inside it. Every container a run
-//! provisions is tracked by [`Containers`] and destroyed by the executor when the
-//! run ends (success, failure, or cancel) — see `Executor::run_with_cancel`.
-//!
-//! The Docker client connects lazily on first use, so a blueprint that uses no
-//! container nodes never requires a running daemon.
+//! These nodes let a blueprint move execution off the host into an isolated
+//! sandbox: [`ProvisionNode`] creates one, [`CheckoutNode`] git-clones a repo into
+//! it, and [`ExecNode`] runs commands inside it. The sandbox backend (Docker
+//! today) lives behind the [`Sandbox`](super::sandbox::Sandbox) trait; every
+//! sandbox a run provisions is tracked by [`Sandboxes`](super::sandbox::Sandboxes)
+//! and destroyed by the executor when the run ends — see
+//! `Executor::run_with_cancel`.
 
-use anyhow::{Context, anyhow};
 use async_trait::async_trait;
-use bollard::Docker;
-use bollard::models::{ContainerCreateBody, ExecConfig};
-use bollard::query_parameters::{CreateImageOptionsBuilder, RemoveContainerOptionsBuilder};
-use futures::StreamExt;
-use tokio::sync::{Mutex, OnceCell};
-use tokio_util::sync::CancellationToken;
 
 use super::nodes::{Node, NodeCtx};
 use super::state::{State, Status, Update, render};
 use boitata_core::audit::NodeKind;
 
-/// Where a checkout clones by default (inside the container).
+/// Where a checkout clones by default (inside the sandbox).
 const DEFAULT_WORKSPACE: &str = "/workspace";
-
-/// Per-run Docker handle: a lazily-connected client plus the ids of every
-/// container the run has provisioned, so they can all be torn down at the end.
-#[derive(Default)]
-pub struct Containers {
-    docker: OnceCell<Docker>,
-    provisioned: Mutex<Vec<String>>,
-}
-
-impl Containers {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Connect to the local daemon on first use. Errors surface here (rather than
-    /// at construction) so runs without container nodes never need Docker.
-    async fn docker(&self) -> anyhow::Result<&Docker> {
-        self.docker
-            .get_or_try_init(|| async {
-                Docker::connect_with_local_defaults()
-                    .context("failed to connect to the Docker daemon")
-            })
-            .await
-    }
-
-    /// Pull `image` if needed, create a container running the keep-alive command,
-    /// start it, record its id for cleanup, and return the id.
-    async fn provision(&self, image: &str, cancel: &CancellationToken) -> anyhow::Result<String> {
-        let docker = self.docker().await?;
-
-        // Pull the image (a no-op layer-wise if already present). Draining the
-        // stream to completion is what actually performs the pull.
-        let options = CreateImageOptionsBuilder::new().from_image(image).build();
-        let mut pull = docker.create_image(Some(options), None, None);
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => anyhow::bail!("cancelled while pulling `{image}`"),
-                next = pull.next() => match next {
-                    Some(item) => { item.with_context(|| format!("failed to pull image `{image}`"))?; }
-                    None => break,
-                },
-            }
-        }
-
-        // Keep the container alive so we can `exec` into it. Override the
-        // entrypoint too (not just cmd), so an image with its own ENTRYPOINT
-        // (e.g. `alpine/git`) doesn't turn this into `<entrypoint> sleep infinity`
-        // and exit immediately.
-        let body = ContainerCreateBody {
-            image: Some(image.to_string()),
-            entrypoint: Some(vec!["sleep".to_string()]),
-            cmd: Some(vec!["infinity".to_string()]),
-            ..Default::default()
-        };
-        let created = docker
-            .create_container(None, body)
-            .await
-            .with_context(|| format!("failed to create container from `{image}`"))?;
-        // Record the id the moment the container exists — before starting it — so
-        // a `start_container` failure can't leave an orphan that `cleanup_all`
-        // never sees.
-        self.provisioned.lock().await.push(created.id.clone());
-        docker
-            .start_container(&created.id, None)
-            .await
-            .with_context(|| format!("failed to start container {}", created.id))?;
-
-        Ok(created.id)
-    }
-
-    /// Run `argv` inside container `id`, returning `(exit_code, combined output)`.
-    /// Respects `cancel` (the exec is dropped if the run is cancelled).
-    async fn exec(
-        &self,
-        id: &str,
-        argv: Vec<String>,
-        workdir: Option<&str>,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<(i64, String)> {
-        let docker = self.docker().await?;
-        let config = ExecConfig {
-            cmd: Some(argv),
-            working_dir: workdir.map(str::to_string),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        };
-        let exec = docker
-            .create_exec(id, config)
-            .await
-            .context("failed to create exec")?;
-
-        let mut output = String::new();
-        let started = docker
-            .start_exec(&exec.id, None)
-            .await
-            .context("failed to start exec")?;
-        if let bollard::exec::StartExecResults::Attached {
-            output: mut stream, ..
-        } = started
-        {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => anyhow::bail!("cancelled during exec"),
-                    chunk = stream.next() => match chunk {
-                        Some(chunk) => output.push_str(&chunk.context("exec stream error")?.to_string()),
-                        None => break,
-                    },
-                }
-            }
-        }
-
-        let inspect = docker
-            .inspect_exec(&exec.id)
-            .await
-            .context("failed to inspect exec")?;
-        let code = inspect
-            .exit_code
-            .ok_or_else(|| anyhow!("exec produced no exit code"))?;
-        Ok((code, output))
-    }
-
-    /// Force-remove every provisioned container. Best-effort: failures are logged,
-    /// never propagated, so cleanup can't mask the run's own outcome.
-    pub async fn cleanup_all(&self) {
-        let ids = std::mem::take(&mut *self.provisioned.lock().await);
-        if ids.is_empty() {
-            return;
-        }
-        let Ok(docker) = self.docker().await else {
-            return;
-        };
-        let options = RemoveContainerOptionsBuilder::new()
-            .force(true)
-            .v(true)
-            .build();
-        for id in ids {
-            if let Err(e) = docker.remove_container(&id, Some(options.clone())).await {
-                tracing::warn!("failed to remove container {id}: {e}");
-            } else {
-                tracing::info!("removed container {id}");
-            }
-        }
-    }
-}
 
 /// Build the shell command a [`CheckoutNode`] runs: clone `repo` into `path`, then
 /// (optionally) check out `git_ref`. Kept pure so it can be unit-tested without a
@@ -227,7 +74,7 @@ impl Node for ProvisionNode {
 
     async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
         let image = render(&self.image, state);
-        let id = cx.containers.provision(&image, &cx.cancel).await?;
+        let id = cx.sandbox.provision(&image, &cx.cancel).await?;
         Ok(Update::from_node(&self.name, id, Status::Ok))
     }
 }
@@ -274,10 +121,7 @@ impl Node for CheckoutNode {
         let repo = render(&self.repo, state);
         let git_ref = self.git_ref.as_ref().map(|r| render(r, state));
         let argv = checkout_command(&repo, &self.path, git_ref.as_deref());
-        let (code, output) = cx
-            .containers
-            .exec(&container, argv, None, &cx.cancel)
-            .await?;
+        let (code, output) = cx.sandbox.exec(&container, argv, None, &cx.cancel).await?;
         let status = if code == 0 {
             Status::Ok
         } else {
@@ -326,7 +170,7 @@ impl Node for ExecNode {
         let command = render(&self.run, state);
         let argv = vec!["sh".to_string(), "-c".to_string(), command];
         let (code, output) = cx
-            .containers
+            .sandbox
             .exec(&container, argv, self.workdir.as_deref(), &cx.cancel)
             .await?;
         let status = if code == 0 {
