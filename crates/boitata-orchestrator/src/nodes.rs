@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use super::container::Containers;
 use super::human::HumanInterface;
 use super::state::{State, Status, Update, render, render_shell};
 use boitata_agent::{Agent, Task};
@@ -29,6 +30,9 @@ pub struct NodeCtx<'a> {
     pub max_iterations: Option<usize>,
     pub compact_threshold: Option<f32>,
     pub human: Arc<dyn HumanInterface>,
+    /// Per-run container manager for the provisioning nodes; tears down every
+    /// container the run provisioned when it ends.
+    pub containers: Arc<Containers>,
     pub cancel: CancellationToken,
 }
 
@@ -46,6 +50,7 @@ impl<'a> NodeCtx<'a> {
             max_iterations: self.max_iterations,
             compact_threshold: self.compact_threshold,
             human: self.human.clone(),
+            containers: self.containers.clone(),
             cancel,
         }
     }
