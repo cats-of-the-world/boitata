@@ -162,6 +162,14 @@ fn resolve_existing_prefix(path: &Path) -> PathBuf {
             let tail = path
                 .strip_prefix(ancestor)
                 .expect("ancestor is a prefix of path");
+            // When the whole path already exists, `tail` is empty. `canonical.join("")`
+            // appends a trailing separator (`<file>/`), which makes the kernel treat an
+            // existing regular file as "open as directory" → ENOTDIR on the caller's
+            // subsequent read/open (e.g. `file_read`/`file_edit`). Return the canonical
+            // path as-is in that case.
+            if tail.as_os_str().is_empty() {
+                return canonical;
+            }
             return canonical.join(tail);
         }
     }
@@ -188,7 +196,15 @@ mod tests {
 
         // Relative path is joined onto the root.
         let resolved = confine_within(Some(&root), "a.txt").unwrap();
-        assert!(resolved.starts_with(&root));
+        // The existing file must resolve to exactly root/a.txt — no trailing
+        // separator. A trailing slash (`a.txt/`) turns the subsequent open into
+        // "open file as directory" → ENOTDIR, breaking file_read/file_edit.
+        assert_eq!(resolved, root.join("a.txt"));
+        assert_eq!(
+            std::fs::read_to_string(&resolved).unwrap(),
+            "x",
+            "resolved path must be readable"
+        );
 
         // A not-yet-existing file inside the root is allowed (for writes).
         let new = confine_within(Some(&root), "sub/new.txt").unwrap();
