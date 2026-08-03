@@ -13,8 +13,9 @@ mod docker;
 
 use std::sync::Arc;
 
+use std::sync::Mutex;
+
 use async_trait::async_trait;
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 pub use docker::DockerSandbox;
@@ -67,13 +68,16 @@ impl Sandboxes {
 
     /// Provision an environment and record it for cleanup. The backend guarantees
     /// no orphan on failure, so only successfully-provisioned ids are tracked.
+    /// The tracking push is synchronous (a `std::sync::Mutex`), so there's no
+    /// await point between obtaining the id and recording it where a dropped
+    /// future could leak an untracked sandbox.
     pub async fn provision(
         &self,
         image: &str,
         cancel: &CancellationToken,
     ) -> anyhow::Result<String> {
         let id = self.backend.provision(image, cancel).await?;
-        self.provisioned.lock().await.push(id.clone());
+        self.provisioned.lock().unwrap().push(id.clone());
         Ok(id)
     }
 
@@ -90,7 +94,7 @@ impl Sandboxes {
     /// Destroy every provisioned environment, concurrently. Best-effort: failures
     /// are logged, never propagated, so cleanup can't mask the run's own outcome.
     pub async fn cleanup_all(&self) {
-        let ids = std::mem::take(&mut *self.provisioned.lock().await);
+        let ids = std::mem::take(&mut *self.provisioned.lock().unwrap());
         let backend = &self.backend;
         futures::future::join_all(ids.into_iter().map(|id| async move {
             match backend.destroy(&id).await {
@@ -131,7 +135,7 @@ mod tests {
             Ok((0, String::new()))
         }
         async fn destroy(&self, id: &str) -> anyhow::Result<()> {
-            self.destroyed.lock().await.push(id.to_string());
+            self.destroyed.lock().unwrap().push(id.to_string());
             Ok(())
         }
     }
@@ -146,12 +150,12 @@ mod tests {
         let b = sandboxes.provision("img", &cancel).await.unwrap();
         sandboxes.cleanup_all().await;
 
-        let mut destroyed = backend.destroyed.lock().await.clone();
+        let mut destroyed = backend.destroyed.lock().unwrap().clone();
         destroyed.sort();
         assert_eq!(destroyed, vec![a, b]);
 
         // A second cleanup is a no-op (the tracked set was drained).
         sandboxes.cleanup_all().await;
-        assert_eq!(backend.destroyed.lock().await.len(), 2);
+        assert_eq!(backend.destroyed.lock().unwrap().len(), 2);
     }
 }
