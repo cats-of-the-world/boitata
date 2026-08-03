@@ -12,7 +12,7 @@
 // every event (only provider/model/base_url-level metadata is captured upstream).
 
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -35,7 +35,7 @@ struct AuditRecord {
 }
 
 /// A single auditable moment in an agent run.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum AuditEvent {
     /// A run began.
@@ -119,7 +119,7 @@ pub enum AuditEvent {
 }
 
 /// Which kind of blueprint node ran.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     Agent,
@@ -136,7 +136,7 @@ pub enum NodeKind {
 /// `audit` is a lower-level module that must not depend on `blueprint` (the
 /// dependency runs the other way). The executor maps `Status` to `NodeStatus` at
 /// the audit boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
     Ok,
@@ -144,7 +144,7 @@ pub enum NodeStatus {
 }
 
 /// Why a blueprint run ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionReason {
     Completed,

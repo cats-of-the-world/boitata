@@ -14,8 +14,9 @@ tokio = { version = "1.42", features = ["full"] }
 tokio-stream = "0.1"
 # Concurrent futures (join_all for parallel blueprint super-steps)
 futures = "0.3"
-# CancellationToken for cooperative tool cancellation
-tokio-util = "0.7.19"
+# CancellationToken for cooperative tool cancellation; `compat` bridges tokio
+# TCP streams to the futures AsyncRead/AsyncWrite the ACP transport expects.
+tokio-util = { version = "0.7.19", features = ["compat"] }
 
 # HTTP
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -74,6 +75,8 @@ mime_guess = "2"
 async-stream = "0.3"
 # SSE client decoding for the CLI's `--remote` mode
 eventsource-stream = "0.2"
+# Agent Client Protocol: agent<->orchestrator wire protocol
+agent-client-protocol = "2"
 # Docker daemon client for the orchestrator's container-provisioning nodes
 bollard = "0.21"
 
@@ -81,6 +84,7 @@ bollard = "0.21"
 boitata-core = { path = "crates/boitata-core" }
 boitata-agent = { path = "crates/boitata-agent" }
 boitata-orchestrator = { path = "crates/boitata-orchestrator" }
+boitata-acp = { path = "crates/boitata-acp" }
 
 # Dev-only (shared)
 tokio-test = "0.4"
