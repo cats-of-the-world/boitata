@@ -53,6 +53,9 @@ mdbook serve docs/      # live preview at http://localhost:3000
 - **Determinism first** — leans on `cargo`, `rg`, and `git` instead of the LLM.
 - **Auditable** — every run appends a structured JSONL event log.
 - **Blueprints** — agent/tool/script/human graphs with retry and verify loops.
+- **Sandboxed execution** — provision a container, clone the code, and run the
+  agent inside it over the [Agent Client Protocol](https://agentclientprotocol.com/)
+  (Firecracker microVMs next).
 - **MCP** — connect any [Model Context Protocol](https://modelcontextprotocol.io)
   server.
 

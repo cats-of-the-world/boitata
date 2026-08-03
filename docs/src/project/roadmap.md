@@ -32,14 +32,26 @@ Where Boitata is headed. Checked items are done.
 - [x] Parallel super-steps (fan-out / fan-in), in-memory checkpoint + retry,
       human-in-the-loop
 
-## Sprint 5: Workspace Management
+## Sprint 5: Interfaces
 
-- [ ] Workspace manager with isolation
-- [ ] Snapshot/restore for retries
-- [ ] Task queue and executor
+- [x] Cargo workspace of focused crates (core / agent / orchestrator / cli / server)
+- [x] HTTP/SSE server with an embedded React web UI for task monitoring
+- [x] CLI `--remote` mode — schedule a task on a server and stream its progress
 
-## Sprint 6: Interfaces
+## Sprint 6: Sandboxed Execution
 
-- [ ] Full CLI implementation
-- [ ] Web UI for task monitoring
-- [ ] Testing integration (Rust-first)
+- [x] Container blueprint nodes (`provision` / `checkout` / `exec`) via Docker,
+      with automatic teardown at run end
+- [x] `Sandbox` backend trait so other backends can slot in
+- [x] `boitata-agent` as an Agent Client Protocol (ACP) server + client
+      (`boitata-acp`)
+- [x] `agent_sandbox` node — run the agent **inside** a sandbox over ACP
+- [ ] Firecracker microVM `Sandbox` backend (ACP over vsock) + a rootfs image
+- [ ] End-to-end: a task spins up a VM with the code, its deps, and an agent that
+      edits / compiles / tests inside it
+
+## Later
+
+- [ ] Container/VM hardening (resource limits, dropped capabilities, network policy)
+- [ ] Multi-tenant authentication + per-run credential isolation
+- [ ] Snapshot/restore for retries; a durable task queue

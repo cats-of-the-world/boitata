@@ -56,6 +56,14 @@ Every node is tagged by `type` (snake_case):
 | `tool` | `tool`, `args?` | Invoke a registered tool with arguments (defaults to `{}`) |
 | `script` | `run` | Run a shell script deterministically, routing on its exit code |
 | `human` | `prompt`, `mode?` | Pause for human input (human-in-the-loop); `mode` defaults to `input` |
+| `provision` | `image` | Create an ephemeral sandbox from `image`; its output is the sandbox id, referenced downstream as `{name}` |
+| `checkout` | `container`, `repo`, `ref?`, `path?` | `git clone` a repo into a sandbox (`path` defaults to `/workspace`) |
+| `exec` | `container`, `run`, `workdir?` | Run a shell command inside a sandbox, routing on its exit code |
+| `agent_sandbox` | `container`, `prompt`, `port?`, `command?` | Run the agent **inside** the sandbox over ACP, streaming its events into the run |
+
+The last four move a run off the host into an isolated sandbox — see
+[Sandboxed Execution](../concepts/sandboxed-execution.md). A sandbox a run
+provisions is destroyed automatically when the run ends.
 
 ### Prompts
 
