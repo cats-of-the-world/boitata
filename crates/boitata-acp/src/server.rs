@@ -112,19 +112,34 @@ async fn run_prompt_turn(
         }
     }
 
-    let stop_reason = match run.await {
-        Ok(Ok(outcome)) if outcome.success => StopReason::EndTurn,
-        Ok(Ok(_)) => StopReason::Refusal,
+    let (stop_reason, message) = match run.await {
+        Ok(Ok(outcome)) => (
+            if outcome.success {
+                StopReason::EndTurn
+            } else {
+                StopReason::Refusal
+            },
+            outcome.message,
+        ),
         Ok(Err(e)) => {
             tracing::warn!("prompt run failed: {e:#}");
-            StopReason::Refusal
+            (StopReason::Refusal, Some(format!("{e:#}")))
         }
         Err(e) => {
             tracing::error!("prompt run task panicked: {e}");
-            StopReason::Refusal
+            (StopReason::Refusal, None)
         }
     };
-    responder.respond(PromptResponse::new(stop_reason))
+
+    // Carry the agent's final message in the response `_meta` so the client can
+    // use it as the node's output (the audit-event stream doesn't include it).
+    let mut response = PromptResponse::new(stop_reason);
+    if let Some(message) = message {
+        let mut meta = serde_json::Map::new();
+        meta.insert("message".to_string(), serde_json::Value::String(message));
+        response = response.meta(meta);
+    }
+    responder.respond(response)
 }
 
 /// Concatenate the text of a prompt's content blocks.
