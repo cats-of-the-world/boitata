@@ -33,6 +33,12 @@ This page explains how that works and how the pieces fit together.
 The agent is self-contained: it has its own tools and works on the sandbox's own
 filesystem, so it never needs the host.
 
+> **Status.** This is the *target* model. Today the container blueprint runs
+> **locally** via the CLI (`boitata run --blueprint examples/blueprints/containerized_task.yaml`).
+> The server does not yet run blueprints — it won't read a blueprint file from a
+> network request (a path-traversal risk), so the server-orchestrated flow above
+> awaits a trusted, server-side blueprint source.
+
 ## The pieces
 
 ### Sandboxes (`Sandbox` trait)

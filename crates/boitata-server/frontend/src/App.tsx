@@ -321,8 +321,16 @@ function formatEvent(ev: RunEvent): {
       };
     case "blueprint_started":
       return { icon: "▶", text: `blueprint ${s("blueprint")} · entry ${s("entry")}`, cls: "info" };
-    case "node_executed":
-      return { icon: "◆", text: `[${s("node")}] ${s("kind")} → ${s("next")} (${s("status")})`, cls: "info" };
+    case "node_executed": {
+      const status = s("status");
+      const output = s("output");
+      const base = `[${s("node")}] ${s("kind")} → ${s("next")} (${status})`;
+      return {
+        icon: "◆",
+        text: output ? `${base} · ${truncate(output, 200)}` : base,
+        cls: status === "failed" ? "err" : "info",
+      };
+    }
     case "super_step_retried":
       return { icon: "↻", text: `retry #${s("attempt")} at step ${s("step")} · ${s("error")}`, cls: "err" };
     case "blueprint_completed":

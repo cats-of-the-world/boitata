@@ -38,7 +38,8 @@ enum Commands {
         /// Path to the config file (default: boitata.toml, or $BOITATA_CONFIG)
         #[arg(long)]
         config: Option<String>,
-        /// Use a specific blueprint
+        /// Path to a blueprint YAML file to run (see examples/blueprints/ for
+        /// ready-to-copy starting points)
         #[arg(long)]
         blueprint: Option<String>,
         /// Schedule the task on a running boitata-server and stream its progress,

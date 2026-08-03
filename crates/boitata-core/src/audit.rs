@@ -102,6 +102,12 @@ pub enum AuditEvent {
         status: NodeStatus,
         /// The next node the run moves to (or the END sentinel).
         next: String,
+        /// The node's output (e.g. a container/script node's stdout+stderr, or
+        /// an agent node's final message). Already size-capped by its source
+        /// (the sandbox caps exec output at 1 MiB); empty when the node produced
+        /// none. Carried in the event so a `Failed` node's reason is visible
+        /// without replaying the full transcript.
+        output: String,
     },
     /// A blueprint super-step failed with a hard error and is being retried from
     /// the pre-step checkpoint.
@@ -228,11 +234,13 @@ mod tests {
             kind: NodeKind::Agent,
             status: NodeStatus::Ok,
             next: "fmt".to_string(),
+            output: "done".to_string(),
         })
         .unwrap();
         assert!(json.contains(r#""event":"node_executed""#));
         assert!(json.contains(r#""kind":"agent""#));
         assert!(json.contains(r#""status":"ok""#));
+        assert!(json.contains(r#""output":"done""#));
 
         // The human node kind serializes to the snake_case tag too.
         let human = serde_json::to_string(&NodeKind::Human).unwrap();

@@ -1,9 +1,12 @@
 # boitata-server
 
-HTTP/SSE backend and embedded web UI for running boitata agent tasks and
-blueprints from a browser. Reuses the CLI's runtime assembly
-(`boitata_core::runtime`) to build the provider, tools, and policy once, then
-serves them to concurrent runs.
+HTTP/SSE backend and embedded web UI for running boitata agent tasks from a
+browser. Reuses the CLI's runtime assembly (`boitata_core::runtime`) to build the
+provider, tools, and policy once, then serves them to concurrent runs.
+
+The server runs the single-agent path only: blueprints are user-provided YAML
+files run locally with the CLI's `--blueprint <path>` (the server won't read a
+blueprint file from a network request).
 
 ## Run
 
@@ -26,15 +29,14 @@ hot-reload, run `npm run dev` in `frontend/` (it proxies `/api` to `:8787`).
 
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
-| `POST` | `/api/runs` | Start a run: `{ "task": "...", "blueprint": "default"? }` → `{ id }` |
+| `POST` | `/api/runs` | Start a run: `{ "task": "..." }` → `{ id }` (a `blueprint` field is rejected) |
 | `GET`  | `/api/runs` | List runs (newest first) |
 | `GET`  | `/api/runs/{id}` | Run detail: summary, result, full event log |
 | `GET`  | `/api/runs/{id}/events` | Live events (Server-Sent Events) |
 | `POST` | `/api/runs/{id}/cancel` | Request cancellation |
-| `GET`  | `/api/blueprints` | Built-in blueprint names |
+| `GET`  | `/api/blueprints` | Blueprints the server can run by name (always empty) |
 
 Runs are held in memory (v1); restarting the server forgets history.
-Human-in-the-loop blueprint nodes are not yet supported over the web.
 
 ## Scheduling from the CLI
 
@@ -43,7 +45,6 @@ locally, streaming the same events to your terminal:
 
 ```bash
 boitata run "fix the failing test" --remote http://127.0.0.1:8787
-boitata run "tidy imports" --blueprint default --remote http://127.0.0.1:8787
 ```
 
 It POSTs to `/api/runs`, tails `/api/runs/{id}/events`, prints the result, exits

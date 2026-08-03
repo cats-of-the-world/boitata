@@ -45,7 +45,7 @@ mod state;
 mod yaml;
 
 pub use human::{HumanInterface, StdioHuman};
-pub use library::{load, starter_names};
+pub use library::load;
 pub use sandbox::Sandbox;
 pub use state::{State, Status};
 
@@ -85,6 +85,20 @@ enum Routing {
     Static(Vec<String>),
     /// Compute the successor set from the state.
     Conditional(Router),
+}
+
+/// One node's outcome in a super-step: identity plus audit/routing data. Built
+/// by [`Executor::run_frontier`] as it merges each node's `Update` into the
+/// state, then consumed by `run_graph` to emit the `NodeExecuted` audit event
+/// and route to the next frontier. `output` is the node's emitted text
+/// (container stdout/stderr, script output, an agent's final message, …) — kept
+/// here so a failing node's reason reaches the audit trail instead of being
+/// dropped after the state merge.
+struct RanNode {
+    name: String,
+    kind: NodeKind,
+    status: NodeStatus,
+    output: String,
 }
 
 #[derive(Debug, Error)]
@@ -578,7 +592,13 @@ impl Executor {
             // Route every node that ran; the live (non-END) successors form the
             // next frontier.
             let mut next = Vec::new();
-            for (name, kind, status) in ran {
+            for RanNode {
+                name,
+                kind,
+                status,
+                output,
+            } in ran
+            {
                 let routes = match Self::route(graph, &name, &state) {
                     Ok(routes) => routes,
                     Err(e) => {
@@ -588,6 +608,7 @@ impl Executor {
                             kind,
                             status,
                             next: String::new(),
+                            output: output.clone(),
                         });
                         self.emit(|| AuditEvent::BlueprintCompleted {
                             steps: step + 1,
@@ -602,6 +623,7 @@ impl Executor {
                     kind,
                     status,
                     next: display_routes(&routes),
+                    output: output.clone(),
                 });
                 next.extend(routes.into_iter().filter(|t| t != END));
             }
@@ -647,7 +669,7 @@ impl Executor {
         cx: &NodeCtx<'_>,
         frontier: &[String],
         state: &mut State,
-    ) -> anyhow::Result<Vec<(String, NodeKind, NodeStatus)>> {
+    ) -> anyhow::Result<Vec<RanNode>> {
         // Resolve every node up front so an unknown one is a clean error rather
         // than a panic inside a future.
         let mut runnables = Vec::with_capacity(frontier.len());
@@ -708,7 +730,7 @@ impl Executor {
         // deterministically but by name order. In practice each node writes only
         // its own name key (unique), so this collides only for nodes that emit a
         // shared custom key.
-        let mut ran: Vec<(String, NodeKind, NodeStatus)> = Vec::with_capacity(outcomes.len());
+        let mut ran: Vec<RanNode> = Vec::with_capacity(outcomes.len());
         let mut any_failed = false;
         let mut any_status = false;
         for (name, kind, update) in outcomes {
@@ -724,8 +746,21 @@ impl Executor {
                 }
                 None => NodeStatus::Ok,
             };
+            // Capture the node's emitted text for the audit trail before the
+            // update is moved into the state merge.
+            let output = update
+                .messages
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
             state.apply(update);
-            ran.push((name, kind, node_status));
+            ran.push(RanNode {
+                name,
+                kind,
+                status: node_status,
+                output,
+            });
         }
         // Super-step status: failure dominates a fan-out, so verify-style routing
         // sees a failure if any parallel branch failed. For a single-node
@@ -831,6 +866,74 @@ mod tests {
         assert_eq!(a.load(Ordering::SeqCst), 1);
         assert_eq!(b.load(Ordering::SeqCst), 1);
         assert_eq!(state.messages.len(), 2);
+    }
+
+    /// Best-effort sink that records every event, to assert what reaches the
+    /// audit trail.
+    #[derive(Default)]
+    struct RecordingSink(parking_lot::Mutex<Vec<AuditEvent>>);
+
+    impl AuditSink for RecordingSink {
+        fn record(&self, event: AuditEvent) {
+            self.0.lock().push(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn failing_node_output_is_audited() {
+        // Mirrors a containerized `clone` step: a node that fails and emits the
+        // command output explaining why. That output must reach the
+        // `NodeExecuted` event so a failure isn't a bare `(failed)`.
+        struct FailingClone;
+        #[async_trait]
+        impl Node for FailingClone {
+            fn name(&self) -> &str {
+                "clone"
+            }
+            fn kind(&self) -> NodeKind {
+                NodeKind::Container
+            }
+            async fn run(&self, _s: &State, _c: &NodeCtx<'_>) -> anyhow::Result<Update> {
+                Ok(Update::from_node(
+                    "clone",
+                    "fatal: could not read remote repository\n".into(),
+                    Status::Failed,
+                ))
+            }
+        }
+
+        let graph = Graph::builder("containerized_task", "clone")
+            .node(FailingClone)
+            .edge("clone", END)
+            .build()
+            .unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        executor()
+            .with_audit(sink.clone())
+            .run(&graph, "t".into())
+            .await
+            .unwrap();
+
+        let (status, output) = sink
+            .0
+            .lock()
+            .iter()
+            .find_map(|e| match e {
+                AuditEvent::NodeExecuted {
+                    node,
+                    status,
+                    output,
+                    ..
+                } if node == "clone" => Some((*status, output.clone())),
+                _ => None,
+            })
+            .expect("a NodeExecuted event for the clone node");
+        assert_eq!(status, NodeStatus::Failed);
+        assert!(
+            output.contains("could not read remote repository"),
+            "NodeExecuted.output should carry the failure reason; got {output:?}"
+        );
     }
 
     #[tokio::test]

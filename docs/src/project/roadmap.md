@@ -26,9 +26,9 @@ Where Boitata is headed. Checked items are done.
 ## Sprint 4: Blueprint System
 
 - [x] Hybrid deterministic/agentic workflows (agent/tool/script/human node graphs)
-- [x] YAML blueprint definitions (`--blueprint <name>` or a path to your own `.yaml`)
-- [x] Starter blueprints (`default`, `fix_lint_errors`, `fix_test_failure`,
-      `setup_devbox`, `human_approval`)
+- [x] YAML blueprint definitions (`--blueprint <path>` to a user-provided `.yaml`)
+- [x] Example blueprints under `examples/blueprints/` (`default`, `fix_lint_errors`,
+      `fix_test_failure`, `setup_devbox`, `human_approval`, `containerized_task`)
 - [x] Parallel super-steps (fan-out / fan-in), in-memory checkpoint + retry,
       human-in-the-loop
 

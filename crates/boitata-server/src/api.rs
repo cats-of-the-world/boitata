@@ -37,8 +37,9 @@ pub fn router(state: AppState) -> Router {
         .fallback(crate::assets::static_handler)
 }
 
-/// Request body for starting a run. `blueprint` is a built-in name (or a path to
-/// a `.yaml`); omit it to run the single-agent path.
+/// Request body for starting a run. The server hosts no blueprints, so
+/// `blueprint` must be omitted (the run takes the single-agent path); supplying
+/// one is rejected. Run blueprints locally with the CLI's `--blueprint <path>`.
 #[derive(Debug, Deserialize)]
 struct StartRun {
     task: String,
@@ -62,17 +63,16 @@ async fn create_run(
     if req.task.trim().is_empty() {
         return Err(ApiError::bad_request("task must not be empty"));
     }
-    // Only accept built-in starter names over the network. `load` would also
-    // resolve arbitrary filesystem paths (`./x.yaml`, `/etc/…`), which would be a
-    // path-traversal / local-file-inclusion vector for a networked server.
+    // Blueprints are user-provided YAML files loaded from disk, and `load` would
+    // resolve arbitrary filesystem paths (`./x.yaml`, `/etc/…`) — a path-traversal
+    // / local-file-inclusion vector for a networked server. So the server hosts no
+    // blueprints: it runs the single-agent path only, and a blueprint request is
+    // rejected. Run blueprints locally with the CLI's `--blueprint <path>`.
     if let Some(name) = &req.blueprint {
-        let starters = boitata_orchestrator::starter_names();
-        if !starters.contains(&name.as_str()) {
-            return Err(ApiError::bad_request(format!(
-                "unknown blueprint `{name}` (built-ins: {})",
-                starters.join(", ")
-            )));
-        }
+        return Err(ApiError::bad_request(format!(
+            "blueprint `{name}` cannot be run on the server; \
+             run blueprints locally with `boitata run --blueprint <path>`"
+        )));
     }
 
     let id = Uuid::new_v4();
@@ -252,9 +252,12 @@ async fn cancel_run(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// `GET /api/blueprints` — the built-in starter names, for the UI dropdown.
+/// `GET /api/blueprints` — the blueprints the server can run by name. The server
+/// hosts none (blueprints are local YAML files run via the CLI's `--blueprint`),
+/// so this is always empty; the UI dropdown then offers only the single-agent
+/// path. Kept as an endpoint so the frontend contract is unchanged.
 async fn list_blueprints() -> Json<Vec<&'static str>> {
-    Json(boitata_orchestrator::starter_names())
+    Json(Vec::new())
 }
 
 /// `GET /api/runs/{id}/events` — Server-Sent Events. Replays the history buffer,
@@ -402,20 +405,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blueprints_lists_starters() {
+    async fn blueprints_lists_none() {
+        // The server hosts no blueprints (they are local YAML files run via the
+        // CLI), so the endpoint returns an empty list.
         let app = router(test_state().await);
         let resp = app
             .oneshot(Request::get("/api/blueprints").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let names = body_json(resp).await;
-        assert!(
-            names
-                .as_array()
-                .is_some_and(|a| a.iter().any(|n| n == "default")),
-            "expected `default` among starters, got {names}"
-        );
+        assert_eq!(body_json(resp).await, json!([]));
     }
 
     #[tokio::test]
