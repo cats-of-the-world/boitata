@@ -136,8 +136,13 @@ impl Sandbox for DockerSandbox {
                         _ = cancel.cancelled() => anyhow::bail!("cancelled during exec"),
                         chunk = stream.next() => match chunk {
                             Some(chunk) => {
-                                let chunk = chunk.context("exec stream error")?.to_string();
-                                append_capped(&mut output, &chunk, &mut truncated);
+                                let log = chunk.context("exec stream error")?;
+                                // Skip the string allocation entirely once full.
+                                if output.len() < MAX_EXEC_OUTPUT {
+                                    append_capped(&mut output, &log.to_string(), &mut truncated);
+                                } else {
+                                    truncated = true;
+                                }
                             }
                             None => break,
                         },

@@ -72,10 +72,13 @@ impl Sandboxes {
     }
 
     /// Provision an environment and record it for cleanup. The backend guarantees
-    /// no orphan on failure, so only successfully-provisioned ids are tracked.
-    /// The tracking push is synchronous (a `std::sync::Mutex`), so there's no
-    /// await point between obtaining the id and recording it where a dropped
-    /// future could leak an untracked sandbox.
+    /// no orphan on its own failure, so only successfully-provisioned ids are
+    /// tracked. The tracking push is synchronous (a `std::sync::Mutex`), so
+    /// nothing yields between obtaining the id and recording it. Cancellation in
+    /// this codebase is cooperative (the provision future runs to completion
+    /// rather than being force-dropped mid-call), so the id is always recorded;
+    /// a hard task-abort mid-`provision` is out of scope and would be handled by
+    /// label-based orphan reaping, not client-side tracking.
     pub async fn provision(
         &self,
         image: &str,
