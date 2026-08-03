@@ -1,6 +1,8 @@
 //! The Docker backend for [`Sandbox`](super::Sandbox): each sandbox is an
 //! ephemeral container. The daemon client connects lazily on first use.
 
+use std::time::Duration;
+
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use bollard::Docker;
@@ -11,6 +13,14 @@ use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use super::Sandbox;
+
+/// Give up on an image pull that stalls this long, so a slow registry or a
+/// hung connection can't keep a provision future alive forever.
+const PULL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Cap on captured exec output. A verbose command shouldn't be able to OOM the
+/// orchestrator; output past this is dropped with a trailing marker.
+const MAX_EXEC_OUTPUT: usize = 1 << 20; // 1 MiB
 
 /// A [`Sandbox`] backed by local Docker containers.
 #[derive(Default)]
@@ -41,16 +51,20 @@ impl Sandbox for DockerSandbox {
         let docker = self.docker().await?;
 
         // Pull the image (a no-op layer-wise if already present). Draining the
-        // stream to completion is what actually performs the pull.
+        // stream to completion is what actually performs the pull; a stall is
+        // bounded by both the cancel token and PULL_TIMEOUT.
         let options = CreateImageOptionsBuilder::new().from_image(image).build();
-        let mut pull = docker.create_image(Some(options), None, None);
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => anyhow::bail!("cancelled while pulling `{image}`"),
-                next = pull.next() => match next {
-                    Some(item) => { item.with_context(|| format!("failed to pull image `{image}`"))?; }
-                    None => break,
-                },
+        let pull = async {
+            let mut stream = docker.create_image(Some(options), None, None);
+            while let Some(item) = stream.next().await {
+                item.with_context(|| format!("failed to pull image `{image}`"))?;
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        tokio::select! {
+            _ = cancel.cancelled() => anyhow::bail!("cancelled while pulling `{image}`"),
+            result = tokio::time::timeout(PULL_TIMEOUT, pull) => {
+                result.with_context(|| format!("timed out pulling image `{image}`"))??;
             }
         }
 
@@ -70,9 +84,15 @@ impl Sandbox for DockerSandbox {
             .with_context(|| format!("failed to create container from `{image}`"))?;
 
         // If starting fails, remove the container we just created so `provision`
-        // never leaves an orphan behind.
+        // never leaves an orphan behind. If that removal also fails (e.g. the
+        // daemon went away), log it — there's nothing left to record it against.
         if let Err(e) = docker.start_container(&created.id, None).await {
-            let _ = self.destroy(&created.id).await;
+            if let Err(cleanup) = self.destroy(&created.id).await {
+                tracing::warn!(
+                    "failed to remove container {} after a failed start: {cleanup}",
+                    created.id
+                );
+            }
             return Err(e).with_context(|| format!("failed to start container {}", created.id));
         }
         Ok(created.id)
@@ -99,6 +119,7 @@ impl Sandbox for DockerSandbox {
             .context("failed to create exec")?;
 
         let mut output = String::new();
+        let mut truncated = false;
         let started = docker
             .start_exec(&exec.id, None)
             .await
@@ -109,13 +130,28 @@ impl Sandbox for DockerSandbox {
         {
             loop {
                 tokio::select! {
+                    // Docker has no "kill exec" API; the exec process is reaped
+                    // when the sandbox is force-removed at run end (cleanup_all),
+                    // which cancellation ultimately triggers.
                     _ = cancel.cancelled() => anyhow::bail!("cancelled during exec"),
                     chunk = stream.next() => match chunk {
-                        Some(chunk) => output.push_str(&chunk.context("exec stream error")?.to_string()),
+                        Some(chunk) => {
+                            let chunk = chunk.context("exec stream error")?.to_string();
+                            // Keep reading to the end (for the exit code) but stop
+                            // accumulating once we hit the cap.
+                            if output.len() < MAX_EXEC_OUTPUT {
+                                output.push_str(&chunk);
+                            } else {
+                                truncated = true;
+                            }
+                        }
                         None => break,
                     },
                 }
             }
+        }
+        if truncated {
+            output.push_str("\n…[output truncated]");
         }
 
         let inspect = docker

@@ -30,6 +30,8 @@ pub trait Sandbox: Send + Sync {
     async fn provision(&self, image: &str, cancel: &CancellationToken) -> anyhow::Result<String>;
 
     /// Run `argv` inside sandbox `id`, returning `(exit_code, combined output)`.
+    /// Output is captured into memory; implementations should cap it so a verbose
+    /// command can't exhaust the host (the Docker backend caps at 1 MiB).
     async fn exec(
         &self,
         id: &str,
@@ -85,16 +87,18 @@ impl Sandboxes {
         self.backend.exec(id, argv, workdir, cancel).await
     }
 
-    /// Destroy every provisioned environment. Best-effort: failures are logged,
-    /// never propagated, so cleanup can't mask the run's own outcome.
+    /// Destroy every provisioned environment, concurrently. Best-effort: failures
+    /// are logged, never propagated, so cleanup can't mask the run's own outcome.
     pub async fn cleanup_all(&self) {
         let ids = std::mem::take(&mut *self.provisioned.lock().await);
-        for id in ids {
-            match self.backend.destroy(&id).await {
+        let backend = &self.backend;
+        futures::future::join_all(ids.into_iter().map(|id| async move {
+            match backend.destroy(&id).await {
                 Ok(()) => tracing::info!("destroyed sandbox {id}"),
                 Err(e) => tracing::warn!("failed to destroy sandbox {id}: {e}"),
             }
-        }
+        }))
+        .await;
     }
 }
 
