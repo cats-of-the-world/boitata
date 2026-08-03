@@ -124,30 +124,30 @@ impl Sandbox for DockerSandbox {
             .start_exec(&exec.id, None)
             .await
             .context("failed to start exec")?;
-        if let bollard::exec::StartExecResults::Attached {
-            output: mut stream, ..
-        } = started
-        {
-            loop {
-                tokio::select! {
-                    // Docker has no "kill exec" API; the exec process is reaped
-                    // when the sandbox is force-removed at run end (cleanup_all),
-                    // which cancellation ultimately triggers.
-                    _ = cancel.cancelled() => anyhow::bail!("cancelled during exec"),
-                    chunk = stream.next() => match chunk {
-                        Some(chunk) => {
-                            let chunk = chunk.context("exec stream error")?.to_string();
-                            // Keep reading to the end (for the exit code) but stop
-                            // accumulating once we hit the cap.
-                            if output.len() < MAX_EXEC_OUTPUT {
-                                output.push_str(&chunk);
-                            } else {
-                                truncated = true;
+        match started {
+            bollard::exec::StartExecResults::Attached {
+                output: mut stream, ..
+            } => {
+                loop {
+                    tokio::select! {
+                        // Docker has no "kill exec" API; the exec process is reaped
+                        // when the sandbox is force-removed at run end (cleanup_all),
+                        // which cancellation ultimately triggers.
+                        _ = cancel.cancelled() => anyhow::bail!("cancelled during exec"),
+                        chunk = stream.next() => match chunk {
+                            Some(chunk) => {
+                                let chunk = chunk.context("exec stream error")?.to_string();
+                                append_capped(&mut output, &chunk, &mut truncated);
                             }
-                        }
-                        None => break,
-                    },
+                            None => break,
+                        },
+                    }
                 }
+            }
+            // We always request attach, so this is unexpected; surface it rather
+            // than silently returning empty output.
+            bollard::exec::StartExecResults::Detached => {
+                tracing::warn!("exec {} started detached; no output captured", exec.id);
             }
         }
         if truncated {
@@ -174,5 +174,57 @@ impl Sandbox for DockerSandbox {
             .remove_container(id, Some(options))
             .await
             .with_context(|| format!("failed to remove container {id}"))
+    }
+}
+
+/// Append `chunk` to `output` without exceeding [`MAX_EXEC_OUTPUT`], truncating
+/// the appended slice to the remaining budget on a UTF-8 char boundary so a
+/// single large chunk can't overshoot the cap. Sets `truncated` when it clips.
+fn append_capped(output: &mut String, chunk: &str, truncated: &mut bool) {
+    let remaining = MAX_EXEC_OUTPUT.saturating_sub(output.len());
+    if remaining == 0 {
+        *truncated = !chunk.is_empty();
+        return;
+    }
+    if chunk.len() <= remaining {
+        output.push_str(chunk);
+    } else {
+        let mut end = remaining;
+        while end > 0 && !chunk.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.push_str(&chunk[..end]);
+        *truncated = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_capped_bounds_output_on_char_boundary() {
+        let mut out = String::new();
+        let mut truncated = false;
+        // A chunk far larger than the cap is clipped to exactly the budget.
+        let big = "x".repeat(MAX_EXEC_OUTPUT + 100);
+        append_capped(&mut out, &big, &mut truncated);
+        assert_eq!(out.len(), MAX_EXEC_OUTPUT);
+        assert!(truncated);
+
+        // Once full, further chunks are dropped, not appended.
+        append_capped(&mut out, "more", &mut truncated);
+        assert_eq!(out.len(), MAX_EXEC_OUTPUT);
+    }
+
+    #[test]
+    fn append_capped_respects_utf8_boundaries() {
+        // Budget lands mid multi-byte char; the append backs off to a boundary.
+        let mut out = "a".repeat(MAX_EXEC_OUTPUT - 1);
+        let mut truncated = false;
+        append_capped(&mut out, "€", &mut truncated); // 3 bytes, only 1 byte left
+        assert_eq!(out.len(), MAX_EXEC_OUTPUT - 1); // nothing partial appended
+        assert!(truncated);
+        assert!(out.is_char_boundary(out.len()));
     }
 }

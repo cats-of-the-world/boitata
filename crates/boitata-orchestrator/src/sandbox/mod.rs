@@ -14,9 +14,14 @@ mod docker;
 use std::sync::Arc;
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
+
+/// Give up on a single sandbox teardown that hangs this long, so an unresponsive
+/// daemon can't block the orchestrator's shutdown forever.
+const DESTROY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub use docker::DockerSandbox;
 
@@ -97,9 +102,11 @@ impl Sandboxes {
         let ids = std::mem::take(&mut *self.provisioned.lock().unwrap());
         let backend = &self.backend;
         futures::future::join_all(ids.into_iter().map(|id| async move {
-            match backend.destroy(&id).await {
-                Ok(()) => tracing::info!("destroyed sandbox {id}"),
-                Err(e) => tracing::warn!("failed to destroy sandbox {id}: {e}"),
+            // Bound each teardown so a hung daemon can't stall shutdown forever.
+            match tokio::time::timeout(DESTROY_TIMEOUT, backend.destroy(&id)).await {
+                Ok(Ok(())) => tracing::info!("destroyed sandbox {id}"),
+                Ok(Err(e)) => tracing::warn!("failed to destroy sandbox {id}: {e}"),
+                Err(_) => tracing::warn!("timed out destroying sandbox {id}"),
             }
         }))
         .await;
