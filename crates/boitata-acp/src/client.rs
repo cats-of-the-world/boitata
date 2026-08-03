@@ -82,9 +82,15 @@ async fn drive_prompt(
                 ))
                 .block_task()
                 .await?;
+            let message = response
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("message"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             Ok(AgentOutcome {
                 success: matches!(response.stop_reason, StopReason::EndTurn),
-                message: None,
+                message,
             })
         })
         .await
