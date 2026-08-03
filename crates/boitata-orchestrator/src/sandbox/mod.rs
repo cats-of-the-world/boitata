@@ -46,6 +46,10 @@ pub trait Sandbox: Send + Sync {
         cancel: &CancellationToken,
     ) -> anyhow::Result<(i64, String)>;
 
+    /// Resolve a `host:port` the host can connect to for a service listening on
+    /// `port` inside sandbox `id` (Docker: the container's bridge IP).
+    async fn endpoint(&self, id: &str, port: u16) -> anyhow::Result<String>;
+
     /// Destroy sandbox `id`.
     async fn destroy(&self, id: &str) -> anyhow::Result<()>;
 }
@@ -99,6 +103,10 @@ impl Sandboxes {
         self.backend.exec(id, argv, workdir, cancel).await
     }
 
+    pub async fn endpoint(&self, id: &str, port: u16) -> anyhow::Result<String> {
+        self.backend.endpoint(id, port).await
+    }
+
     /// Destroy every provisioned environment, concurrently. Best-effort: failures
     /// are logged, never propagated, so cleanup can't mask the run's own outcome.
     pub async fn cleanup_all(&self) {
@@ -143,6 +151,9 @@ mod tests {
             _c: &CancellationToken,
         ) -> anyhow::Result<(i64, String)> {
             Ok((0, String::new()))
+        }
+        async fn endpoint(&self, id: &str, port: u16) -> anyhow::Result<String> {
+            Ok(format!("{id}:{port}"))
         }
         async fn destroy(&self, id: &str) -> anyhow::Result<()> {
             self.destroyed.lock().unwrap().push(id.to_string());

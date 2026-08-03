@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 boitata-core = { workspace = true }
 boitata-agent = { workspace = true }
+boitata-acp = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }

@@ -46,6 +46,7 @@ mod yaml;
 
 pub use human::{HumanInterface, StdioHuman};
 pub use library::{load, starter_names};
+pub use sandbox::Sandbox;
 pub use state::{State, Status};
 
 use nodes::{Node, NodeCtx};
@@ -309,6 +310,9 @@ pub struct Executor {
     max_retries: usize,
     /// How `human` nodes collect operator input. Defaults to [`StdioHuman`].
     human: Arc<dyn HumanInterface>,
+    /// Sandbox backend for the provisioning nodes; `None` means the default
+    /// (local Docker). Overridden for other backends (e.g. Firecracker) or tests.
+    sandbox_backend: Option<Arc<dyn Sandbox>>,
 }
 
 impl Executor {
@@ -324,6 +328,7 @@ impl Executor {
             max_steps: DEFAULT_MAX_STEPS,
             max_retries: 0,
             human: Arc::new(StdioHuman::new()),
+            sandbox_backend: None,
         }
     }
 
@@ -371,6 +376,12 @@ impl Executor {
     /// Used to inject a scripted responder in tests.
     pub fn with_human(mut self, human: Arc<dyn HumanInterface>) -> Self {
         self.human = human;
+        self
+    }
+
+    /// Use a specific sandbox backend for provisioning nodes (default: Docker).
+    pub fn with_sandbox(mut self, backend: Arc<dyn Sandbox>) -> Self {
+        self.sandbox_backend = Some(backend);
         self
     }
 
@@ -427,7 +438,10 @@ impl Executor {
         task: String,
         cancel: CancellationToken,
     ) -> anyhow::Result<State> {
-        let sandbox = Arc::new(Sandboxes::with_docker());
+        let sandbox = Arc::new(match &self.sandbox_backend {
+            Some(backend) => Sandboxes::new(backend.clone()),
+            None => Sandboxes::with_docker(),
+        });
         // Catch a panic in the graph loop so cleanup still runs, then re-raise it.
         // Sandbox ids are recorded on `sandbox` as they're provisioned, so
         // `cleanup_all` covers them regardless of where the panic happened.

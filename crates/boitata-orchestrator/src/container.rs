@@ -8,14 +8,24 @@
 //! and destroyed by the executor when the run ends — see
 //! `Executor::run_with_cancel`.
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use async_trait::async_trait;
 
 use super::nodes::{Node, NodeCtx};
 use super::state::{State, Status, Update, render};
-use boitata_core::audit::NodeKind;
+use boitata_core::audit::{AuditSink, NodeKind};
+use tokio_util::sync::CancellationToken;
 
 /// Where a checkout clones by default (inside the sandbox).
 const DEFAULT_WORKSPACE: &str = "/workspace";
+/// Default port the in-sandbox agent listens on for ACP.
+const DEFAULT_AGENT_PORT: u16 = 9000;
+/// Default command that starts the ACP agent inside the sandbox.
+const DEFAULT_AGENT_COMMAND: &str = "boitata-agent";
+/// How long to wait for the in-sandbox agent to start accepting connections.
+const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Build the shell command a [`CheckoutNode`] runs: clone `repo` into `path`, then
 /// (optionally) check out `git_ref`. Kept pure so it can be unit-tested without a
@@ -180,6 +190,118 @@ impl Node for ExecNode {
         };
         Ok(Update::from_node(&self.name, output, status))
     }
+}
+
+/// Run an agent *inside* a sandbox over ACP: launch the `boitata-agent` server
+/// in the container, connect to it, and stream its events into the blueprint —
+/// the containerized counterpart of [`AgentNode`](super::nodes::AgentNode).
+pub struct AgentSandboxNode {
+    name: String,
+    container: String,
+    prompt: String,
+    port: u16,
+    command: String,
+}
+
+impl AgentSandboxNode {
+    pub fn new(
+        name: impl Into<String>,
+        container: impl Into<String>,
+        prompt: impl Into<String>,
+        port: Option<u16>,
+        command: Option<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            container: container.into(),
+            prompt: prompt.into(),
+            port: port.unwrap_or(DEFAULT_AGENT_PORT),
+            command: command.unwrap_or_else(|| DEFAULT_AGENT_COMMAND.to_string()),
+        }
+    }
+
+    /// The shell command that starts the agent detached inside the sandbox.
+    /// `nohup … &` keeps it running (for the sandbox's life) after the exec
+    /// session returns.
+    fn launch_command(&self) -> Vec<String> {
+        let script = format!(
+            "nohup {} --addr 0.0.0.0:{} >/tmp/boitata-agent.log 2>&1 &",
+            self.command, self.port
+        );
+        vec!["sh".into(), "-c".into(), script]
+    }
+}
+
+#[async_trait]
+impl Node for AgentSandboxNode {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn kind(&self) -> NodeKind {
+        NodeKind::Agent
+    }
+
+    async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
+        let container = render(&self.container, state);
+        let prompt = render(&self.prompt, state);
+
+        // 1. Launch the ACP agent inside the sandbox (returns immediately).
+        cx.sandbox
+            .exec(&container, self.launch_command(), None, &cx.cancel)
+            .await?;
+
+        // 2. Resolve the sandbox's address and wait for the agent to come up.
+        let addr = cx.sandbox.endpoint(&container, self.port).await?;
+        wait_ready(&addr, &cx.cancel).await?;
+
+        // 3. Drive it over ACP, teeing the agent's events into the blueprint's
+        //    audit stream (so they surface exactly like a local agent's).
+        let sink: Arc<dyn AuditSink> = cx
+            .audit
+            .clone()
+            .unwrap_or_else(|| Arc::new(NoopSink) as Arc<dyn AuditSink>);
+        let outcome = boitata_acp::run_prompt(&addr, prompt, sink, cx.cancel.clone()).await?;
+
+        let status = if outcome.success {
+            Status::Ok
+        } else {
+            Status::Failed
+        };
+        let text = outcome.message.unwrap_or_else(|| {
+            if outcome.success {
+                format!("agent `{}` produced no output", self.name)
+            } else {
+                format!("agent `{}` failed", self.name)
+            }
+        });
+        Ok(Update::from_node(&self.name, text, status))
+    }
+}
+
+/// Poll `addr` until it accepts a TCP connection or [`AGENT_READY_TIMEOUT`]
+/// elapses, so we don't race the agent's startup.
+async fn wait_ready(addr: &str, cancel: &CancellationToken) -> anyhow::Result<()> {
+    let deadline = Instant::now() + AGENT_READY_TIMEOUT;
+    loop {
+        if cancel.is_cancelled() {
+            anyhow::bail!("cancelled while waiting for the agent at {addr}");
+        }
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(_) => return Ok(()),
+            Err(e) if Instant::now() >= deadline => {
+                return Err(e).map_err(|e| {
+                    anyhow::anyhow!("agent at {addr} did not become ready in time: {e}")
+                });
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    }
+}
+
+/// An [`AuditSink`] that discards events, used when the run has no audit sink.
+struct NoopSink;
+impl AuditSink for NoopSink {
+    fn record(&self, _event: boitata_core::audit::AuditEvent) {}
 }
 
 #[cfg(test)]

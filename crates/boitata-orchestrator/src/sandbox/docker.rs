@@ -169,6 +169,25 @@ impl Sandbox for DockerSandbox {
         Ok((code, output))
     }
 
+    async fn endpoint(&self, id: &str, port: u16) -> anyhow::Result<String> {
+        let docker = self.docker().await?;
+        let info = docker
+            .inspect_container(id, None)
+            .await
+            .with_context(|| format!("failed to inspect container {id}"))?;
+        // Use the container's first attached network's IP (default bridge is
+        // reachable from the host).
+        let ip = info
+            .network_settings
+            .and_then(|ns| ns.networks)
+            .and_then(|nets| {
+                nets.into_values()
+                    .find_map(|ep| ep.ip_address.filter(|s| !s.is_empty()))
+            })
+            .with_context(|| format!("container {id} has no network address yet"))?;
+        Ok(format!("{ip}:{port}"))
+    }
+
     async fn destroy(&self, id: &str) -> anyhow::Result<()> {
         let docker = self.docker().await?;
         let options = RemoveContainerOptionsBuilder::new()

@@ -26,7 +26,7 @@ use anyhow::{Context, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::container::{CheckoutNode, ExecNode, ProvisionNode};
+use super::container::{AgentSandboxNode, CheckoutNode, ExecNode, ProvisionNode};
 use super::nodes::{AgentNode, HumanMode, HumanNode, ScriptNode, ToolNode};
 use super::state::Status;
 use super::{END, Graph, GraphBuilder};
@@ -87,6 +87,16 @@ enum NodeDef {
         run: String,
         #[serde(default)]
         workdir: Option<String>,
+    },
+    /// Run the agent *inside* `container` over ACP: launch the agent server there,
+    /// connect, and stream its events into the blueprint.
+    AgentSandbox {
+        container: String,
+        prompt: String,
+        #[serde(default)]
+        port: Option<u16>,
+        #[serde(default)]
+        command: Option<String>,
     },
 }
 
@@ -153,6 +163,14 @@ fn add_node(builder: GraphBuilder, name: String, node: NodeDef) -> GraphBuilder 
             run,
             workdir,
         } => builder.node(ExecNode::new(name, container, run, workdir)),
+        NodeDef::AgentSandbox {
+            container,
+            prompt,
+            port,
+            command,
+        } => builder.node(AgentSandboxNode::new(
+            name, container, prompt, port, command,
+        )),
     }
 }
 
@@ -528,5 +546,26 @@ edges:
             ["test"]
         );
         assert_eq!(graph.route_for_test("test"), [END]);
+    }
+
+    #[test]
+    fn parses_agent_sandbox_node() {
+        // The `agent_sandbox` variant, with `port`/`command` defaulted and set.
+        let src = r#"
+name: c
+entry: box
+nodes:
+  box:   {type: provision, image: "rust"}
+  agent: {type: agent_sandbox, container: "{box}", prompt: "{task}"}
+  other: {type: agent_sandbox, container: "{box}", prompt: "hi", port: 9100, command: "/usr/bin/boitata-agent"}
+edges:
+  - {from: box, to: agent}
+  - {from: agent, to: other}
+  - {from: other, to: END}
+"#;
+        let graph = from_yaml(src).expect("valid agent_sandbox blueprint");
+        assert_eq!(graph.route_for_test("box"), ["agent"]);
+        assert_eq!(graph.route_for_test("agent"), ["other"]);
+        assert_eq!(graph.route_for_test("other"), [END]);
     }
 }
