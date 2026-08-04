@@ -12,6 +12,8 @@
 # The image must ship git, the toolchain the `test` step needs, AND the
 # `boitata-agent` binary on PATH (that's what the `agent_sandbox` nodes launch and
 # drive over ACP) — so point `image` at a purpose-built image, not a stock one.
+# Build the matching image from the repo root:
+#   docker build -f examples/boitata-agent-rust.Dockerfile -t boitata-agent-rust:latest .
 # Requires a running Docker daemon.
 name: containerized_task
 entry: provision

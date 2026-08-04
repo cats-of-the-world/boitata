@@ -39,6 +39,9 @@ filesystem, so it never needs the host.
 > (`boitata-server --blueprints-dir examples/blueprints`), which is how the
 > server-orchestrated flow above is enabled — the server offers only those vetted
 > blueprints by name, never an arbitrary path from a network request.
+>
+> Its image must carry the in-container `boitata-agent`; build it with
+> `docker build -f examples/boitata-agent-rust.Dockerfile -t boitata-agent-rust:latest .`
 
 ## The pieces
 
