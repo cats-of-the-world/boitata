@@ -28,6 +28,11 @@ struct Args {
     /// Address to bind, e.g. 127.0.0.1:8787 or 0.0.0.0:8787
     #[arg(long, default_value = "127.0.0.1:8787")]
     addr: String,
+    /// Directory of blueprint YAML files to offer by name in the API and web UI
+    /// (e.g. examples/blueprints). Only these vetted files are runnable over the
+    /// network; omit to run the single-agent path only.
+    #[arg(long)]
+    blueprints_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -56,7 +61,24 @@ async fn main() -> anyhow::Result<()> {
     let tools = runtime::build_tools(&config).await?;
     let policy = runtime::build_policy(&config)?;
 
-    let state = AppState::new(config, provider, tools, policy);
+    // Discover the blueprints the server will offer by name (none unless
+    // `--blueprints-dir` is set). Each file is compiled here, so a malformed
+    // blueprint is a startup error rather than a surprise mid-run.
+    let blueprints = match &args.blueprints_dir {
+        Some(dir) => {
+            let found = boitata_orchestrator::discover(std::path::Path::new(dir))
+                .with_context(|| format!("failed to load blueprints from {dir}"))?;
+            info!(
+                "Loaded {} blueprint(s) from {dir}: [{}]",
+                found.len(),
+                found.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+            found
+        }
+        None => Default::default(),
+    };
+
+    let state = AppState::new(config, provider, tools, policy, blueprints);
     let app = api::router(state);
 
     let listener = tokio::net::TcpListener::bind(&args.addr)

@@ -45,7 +45,7 @@ mod state;
 mod yaml;
 
 pub use human::{HumanInterface, StdioHuman};
-pub use library::load;
+pub use library::{discover, load};
 pub use sandbox::Sandbox;
 pub use state::{State, Status};
 

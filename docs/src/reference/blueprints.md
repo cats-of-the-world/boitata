@@ -151,3 +151,16 @@ edges:
   - {from: verify, when: failure, to: work}
   - {from: verify, when: success, to: END}
 ```
+
+## On the server
+
+The [web UI / server](../interfaces/server.md) runs blueprints too, but **by
+name** rather than by path: start it with `--blueprints-dir <dir>` and it offers
+every `.yaml` in that directory (by file stem) in the run form and at
+`GET /api/blueprints`. Only those vetted names are accepted — the server never
+reads an arbitrary path from a network request. Point it at `examples/blueprints`,
+or your own directory:
+
+```bash
+boitata-server --blueprints-dir examples/blueprints
+```

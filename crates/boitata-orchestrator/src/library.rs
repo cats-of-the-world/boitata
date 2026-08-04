@@ -5,8 +5,9 @@
 // examples lives under `examples/blueprints/` in the repo (they are not compiled
 // into the binary); point `--blueprint` at one of those, or at your own file.
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 
@@ -29,6 +30,43 @@ pub fn load(path: &str) -> anyhow::Result<Graph> {
     from_yaml(&src).with_context(|| format!("failed to load blueprint from `{path}`"))
 }
 
+/// Discover the blueprints in directory `dir`: a map from each `.yaml`/`.yml`
+/// file's stem to its path, sorted by name.
+///
+/// This is how a host exposes a *fixed, trusted* set of blueprints by name —
+/// e.g. `boitata-server --blueprints-dir`, which offers only these files and
+/// never resolves an arbitrary path from a network request. Each file is compiled
+/// up front so a malformed blueprint fails at startup, not when a user selects it.
+pub fn discover(dir: &Path) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+    let entries = fs::read_dir(dir)
+        .with_context(|| format!("failed to read blueprints directory `{}`", dir.display()))?;
+    let mut blueprints = BTreeMap::new();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("failed to read an entry in `{}`", dir.display()))?
+            .path();
+        let is_yaml = path
+            .extension()
+            .is_some_and(|ext| ext == "yaml" || ext == "yml");
+        if !path.is_file() || !is_yaml {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .with_context(|| format!("blueprint file `{}` has a non-UTF-8 name", path.display()))?
+            .to_string();
+        let path_str = path
+            .to_str()
+            .with_context(|| format!("blueprint path `{}` is not valid UTF-8", path.display()))?;
+        // Compile now so a broken file surfaces at startup rather than at run time.
+        load(path_str)
+            .with_context(|| format!("blueprint `{name}` in `{}` is invalid", dir.display()))?;
+        blueprints.insert(name, path);
+    }
+    Ok(blueprints)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,12 +83,49 @@ mod tests {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "yaml") {
                 count += 1;
-                load(path.to_str().unwrap()).unwrap_or_else(|e| {
+                let path_str = path
+                    .to_str()
+                    .unwrap_or_else(|| panic!("non-UTF-8 example path: {}", path.display()));
+                load(path_str).unwrap_or_else(|e| {
                     panic!("example `{}` failed to load: {e:#}", path.display())
                 });
             }
         }
         assert!(count > 0, "no example blueprints found in {dir}");
+    }
+
+    #[test]
+    fn discover_maps_names_to_paths_and_validates() {
+        // A directory of blueprints is discovered by stem, sorted, and each file
+        // is compiled (so a broken one is rejected up front).
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("beta.yaml"),
+            "name: b\nentry: a\nnodes:\n  a: {type: tool, tool: cargo_fmt}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("alpha.yml"),
+            "name: a\nentry: a\nnodes:\n  a: {type: tool, tool: cargo_fmt}\n",
+        )
+        .unwrap();
+        // A non-YAML file is ignored.
+        fs::write(dir.path().join("notes.txt"), "ignore me").unwrap();
+
+        let found = discover(dir.path()).unwrap();
+        assert_eq!(
+            found.keys().cloned().collect::<Vec<_>>(),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+        assert!(found["beta"].ends_with("beta.yaml"));
+
+        // A malformed blueprint fails discovery (not silently skipped).
+        fs::write(
+            dir.path().join("broken.yaml"),
+            "name: x\nentry: nope\nnodes: {}\n",
+        )
+        .unwrap();
+        assert!(discover(dir.path()).is_err());
     }
 
     #[test]

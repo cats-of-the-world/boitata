@@ -33,11 +33,12 @@ This page explains how that works and how the pieces fit together.
 The agent is self-contained: it has its own tools and works on the sandbox's own
 filesystem, so it never needs the host.
 
-> **Status.** This is the *target* model. Today the container blueprint runs
-> **locally** via the CLI (`boitata run --blueprint examples/blueprints/containerized_task.yaml`).
-> The server does not yet run blueprints — it won't read a blueprint file from a
-> network request (a path-traversal risk), so the server-orchestrated flow above
-> awaits a trusted, server-side blueprint source.
+> **Status.** This is the *target* model. The container blueprint runs today
+> **locally** via the CLI (`boitata run --blueprint examples/blueprints/containerized_task.yaml`)
+> and **on the server** when it's started with a trusted blueprints directory
+> (`boitata-server --blueprints-dir examples/blueprints`), which is how the
+> server-orchestrated flow above is enabled — the server offers only those vetted
+> blueprints by name, never an arbitrary path from a network request.
 
 ## The pieces
 
