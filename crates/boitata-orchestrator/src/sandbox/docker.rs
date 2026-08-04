@@ -175,14 +175,26 @@ impl Sandbox for DockerSandbox {
             .inspect_container(id, None)
             .await
             .with_context(|| format!("failed to inspect container {id}"))?;
-        // Use the container's first attached network's IP (default bridge is
-        // reachable from the host).
+        // Pick the container's IP deterministically: a container can be on several
+        // networks, and the networks map has no defined iteration order, so prefer
+        // the default `bridge` network (reachable from the host) and otherwise fall
+        // back to the alphabetically-first network with an address — never
+        // whichever the map happens to yield first.
         let ip = info
             .network_settings
             .and_then(|ns| ns.networks)
             .and_then(|nets| {
-                nets.into_values()
-                    .find_map(|ep| ep.ip_address.filter(|s| !s.is_empty()))
+                let addr = |name: &str| {
+                    nets.get(name)
+                        .and_then(|ep| ep.ip_address.clone())
+                        .filter(|s| !s.is_empty())
+                };
+                if let Some(ip) = addr("bridge") {
+                    return Some(ip);
+                }
+                let mut names: Vec<&String> = nets.keys().collect();
+                names.sort();
+                names.into_iter().find_map(|name| addr(name))
             })
             .with_context(|| format!("container {id} has no network address yet"))?;
         Ok(format!("{ip}:{port}"))

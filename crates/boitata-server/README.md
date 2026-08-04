@@ -5,6 +5,10 @@ blueprints from a browser. Reuses the CLI's runtime assembly
 (`boitata_core::runtime`) to build the provider, tools, and policy once, then
 serves them to concurrent runs.
 
+Blueprints are offered **by name** from the `--blueprints-dir` directory (only
+those vetted files are runnable; the server never reads an arbitrary path from a
+network request). Without the flag, the server runs the single-agent path only.
+
 ## Run
 
 ```bash
@@ -13,7 +17,8 @@ serves them to concurrent runs.
 cd frontend && npm install && npm run build && cd ..
 
 # 2. Build & run the server (reads boitata.toml / $BOITATA_CONFIG like the CLI).
-cargo run -p boitata-server -- --addr 127.0.0.1:8787
+#    --blueprints-dir offers blueprints by name in the API and web UI.
+cargo run -p boitata-server -- --addr 127.0.0.1:8787 --blueprints-dir examples/blueprints
 ```
 
 Then open <http://127.0.0.1:8787>.
@@ -26,15 +31,14 @@ hot-reload, run `npm run dev` in `frontend/` (it proxies `/api` to `:8787`).
 
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
-| `POST` | `/api/runs` | Start a run: `{ "task": "...", "blueprint": "default"? }` → `{ id }` |
+| `POST` | `/api/runs` | Start a run: `{ "task": "...", "blueprint": "name"? }` → `{ id }`; an unknown blueprint name is rejected |
 | `GET`  | `/api/runs` | List runs (newest first) |
 | `GET`  | `/api/runs/{id}` | Run detail: summary, result, full event log |
 | `GET`  | `/api/runs/{id}/events` | Live events (Server-Sent Events) |
 | `POST` | `/api/runs/{id}/cancel` | Request cancellation |
-| `GET`  | `/api/blueprints` | Built-in blueprint names |
+| `GET`  | `/api/blueprints` | Names of the configured blueprints (empty without `--blueprints-dir`) |
 
 Runs are held in memory (v1); restarting the server forgets history.
-Human-in-the-loop blueprint nodes are not yet supported over the web.
 
 ## Scheduling from the CLI
 
@@ -43,7 +47,6 @@ locally, streaming the same events to your terminal:
 
 ```bash
 boitata run "fix the failing test" --remote http://127.0.0.1:8787
-boitata run "tidy imports" --blueprint default --remote http://127.0.0.1:8787
 ```
 
 It POSTs to `/api/runs`, tails `/api/runs/{id}/events`, prints the result, exits

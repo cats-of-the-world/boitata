@@ -5,11 +5,14 @@ typed graph — hybrid deterministic/agentic workflows with fan-out, retry, and
 verify loops. This is how Boitata automates multi-step workflows instead of a
 single free-form agent run.
 
-Run one with `--blueprint <name>` (a built-in) or a path to your own `.yaml`:
+Blueprints are YAML files you provide. Point `--blueprint` at a path — either one
+of the ready-to-copy examples under
+[`examples/blueprints/`](https://github.com/cats-of-the-world/boitata/tree/master/examples/blueprints)
+or your own file:
 
 ```bash
-# built-in
-boitata run "fix the failing test" --blueprint fix_test_failure
+# a shipped example
+boitata run "fix the failing test" --blueprint examples/blueprints/fix_test_failure.yaml
 
 # your own file
 boitata run "prepare the repo" --blueprint ./my-blueprint.yaml
@@ -106,10 +109,12 @@ no edge yields an empty set and that path ends.
 > Human-in-the-loop nodes are not yet supported over the
 > [web UI](../interfaces/server.md).
 
-## Built-in blueprints
+## Example blueprints
 
-Boitata ships starter blueprints in
-[`crates/boitata-orchestrator/blueprints/`](https://github.com/cats-of-the-world/boitata/tree/master/crates/boitata-orchestrator/blueprints):
+Boitata ships ready-to-copy example blueprints in
+[`examples/blueprints/`](https://github.com/cats-of-the-world/boitata/tree/master/examples/blueprints).
+They are plain YAML files — not compiled into the binary — so copy one as a
+starting point and point `--blueprint` at your copy (or run it in place):
 
 | Blueprint | Shape |
 |-----------|-------|
@@ -118,6 +123,7 @@ Boitata ships starter blueprints in
 | `fix_test_failure` | `agent → cargo test`, looping until the suite passes |
 | `setup_devbox` | `script (devbox init && install) → agent` |
 | `human_approval` | `human (approval) → agent`, ending on a negative reply |
+| `containerized_task` | `provision → checkout → exec (cargo test)` in an ephemeral container |
 
 ## Writing your own
 
@@ -144,4 +150,17 @@ edges:
   - {from: fmt, to: verify}
   - {from: verify, when: failure, to: work}
   - {from: verify, when: success, to: END}
+```
+
+## On the server
+
+The [web UI / server](../interfaces/server.md) runs blueprints too, but **by
+name** rather than by path: start it with `--blueprints-dir <dir>` and it offers
+every `.yaml` in that directory (by file stem) in the run form and at
+`GET /api/blueprints`. Only those vetted names are accepted — the server never
+reads an arbitrary path from a network request. Point it at `examples/blueprints`,
+or your own directory:
+
+```bash
+boitata-server --blueprints-dir examples/blueprints
 ```

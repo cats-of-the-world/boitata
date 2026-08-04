@@ -6,7 +6,8 @@
 //! [`RunResult`]. Restarting the server forgets past runs; persistence is a later
 //! step.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use boitata_agent::TaskResult;
@@ -32,6 +33,11 @@ pub struct AppState {
     pub tools: ToolRegistry,
     pub policy: Arc<ToolPolicy>,
     pub runs: Arc<RwLock<HashMap<Uuid, Arc<RunHandle>>>>,
+    /// Blueprints the server can run, by name → file path. Populated from the
+    /// `--blueprints-dir` directory at startup (empty when none is configured).
+    /// Only these vetted names are accepted over the network — never an arbitrary
+    /// path — so a run request can't read a file outside this set.
+    pub blueprints: Arc<BTreeMap<String, PathBuf>>,
 }
 
 impl AppState {
@@ -40,6 +46,7 @@ impl AppState {
         provider: Arc<dyn Provider>,
         tools: ToolRegistry,
         policy: ToolPolicy,
+        blueprints: BTreeMap<String, PathBuf>,
     ) -> Self {
         Self {
             config: Arc::new(config),
@@ -47,6 +54,7 @@ impl AppState {
             tools,
             policy: Arc::new(policy),
             runs: Arc::new(RwLock::new(HashMap::new())),
+            blueprints: Arc::new(blueprints),
         }
     }
 

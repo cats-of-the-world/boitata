@@ -204,6 +204,9 @@ pub struct AgentSandboxNode {
 }
 
 impl AgentSandboxNode {
+    /// In-sandbox file holding the launched agent's PID, for later cleanup.
+    const PID_FILE: &'static str = "/tmp/boitata-agent.pid";
+
     pub fn new(
         name: impl Into<String>,
         container: impl Into<String>,
@@ -221,15 +224,29 @@ impl AgentSandboxNode {
     }
 
     /// The shell command that starts the agent detached inside the sandbox.
-    /// `nohup … &` keeps it running (for the sandbox's life) after the exec
-    /// session returns. The command (from blueprint YAML) is shell-quoted so it's
-    /// a single program word and can't inject into the `sh -c` script; the port is
-    /// a `u16`, so it's already safe to interpolate.
+    /// `nohup … &` keeps it running after the exec session returns; its PID is
+    /// recorded so [`stop_command`](Self::stop_command) can stop it afterward. The
+    /// command (from blueprint YAML) is shell-quoted so it's a single program word
+    /// and can't inject into the `sh -c` script; the port is a `u16`, so it's
+    /// already safe to interpolate.
     fn launch_command(&self) -> Vec<String> {
         let script = format!(
-            "nohup {} --addr 0.0.0.0:{} >/tmp/boitata-agent.log 2>&1 &",
+            "nohup {} --addr 0.0.0.0:{} >/tmp/boitata-agent.log 2>&1 & echo $! >{}",
             shell_quote(&self.command),
-            self.port
+            self.port,
+            Self::PID_FILE,
+        );
+        vec!["sh".into(), "-c".into(), script]
+    }
+
+    /// Best-effort command to stop the detached agent launched above, so it
+    /// doesn't linger inside the sandbox after the turn (a single sandbox may run
+    /// several `agent_sandbox` nodes in sequence). `|| true` keeps a missing
+    /// pidfile or already-exited process from failing the exec.
+    fn stop_command() -> Vec<String> {
+        let script = format!(
+            "kill \"$(cat {pid} 2>/dev/null)\" 2>/dev/null || true",
+            pid = Self::PID_FILE,
         );
         vec!["sh".into(), "-c".into(), script]
     }
@@ -263,8 +280,24 @@ impl Node for AgentSandboxNode {
             .audit
             .clone()
             .unwrap_or_else(|| Arc::new(NoopSink) as Arc<dyn AuditSink>);
-        let outcome = boitata_acp::run_prompt(&addr, prompt, sink, cx.cancel.clone()).await?;
+        let result = boitata_acp::run_prompt(&addr, prompt, sink, cx.cancel.clone()).await;
 
+        // 4. Stop the detached agent regardless of how the turn ended (success,
+        //    failure, or cancellation), so it doesn't outlive the turn. Use a
+        //    fresh, uncancelled token so cleanup still runs after a cancelled run;
+        //    it's best-effort, so a failure here (e.g. the sandbox already gone) is
+        //    ignored.
+        let _ = cx
+            .sandbox
+            .exec(
+                &container,
+                Self::stop_command(),
+                None,
+                &CancellationToken::new(),
+            )
+            .await;
+
+        let outcome = result?;
         let status = if outcome.success {
             Status::Ok
         } else {
@@ -296,7 +329,16 @@ async fn wait_ready(addr: &str, cancel: &CancellationToken) -> anyhow::Result<()
                     anyhow::anyhow!("agent at {addr} did not become ready in time: {e}")
                 });
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            // Back off before retrying, but wake immediately on cancellation
+            // instead of sleeping out the full interval first.
+            Err(_) => {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        anyhow::bail!("cancelled while waiting for the agent at {addr}");
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                }
+            }
         }
     }
 }
@@ -353,7 +395,8 @@ mod tests {
         assert_eq!(argv[1], "-c");
         assert_eq!(
             argv[2],
-            "nohup '; rm -rf / #' --addr 0.0.0.0:9000 >/tmp/boitata-agent.log 2>&1 &"
+            "nohup '; rm -rf / #' --addr 0.0.0.0:9000 >/tmp/boitata-agent.log 2>&1 & \
+             echo $! >/tmp/boitata-agent.pid"
         );
     }
 }

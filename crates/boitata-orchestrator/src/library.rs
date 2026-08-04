@@ -1,138 +1,137 @@
-// The blueprint registry: how `--blueprint <name>` resolves to a [`Graph`].
+// Blueprint loading: how `--blueprint <path>` resolves to a [`Graph`].
 //
-// Blueprints are defined in YAML, never in code. A small starter library ships
-// embedded in the binary (below); `load` resolves a value to a starter by name,
-// or, failing that, reads it as a path to the user's own YAML file.
+// Blueprints are defined in YAML, never in code, and are entirely user-provided:
+// `load` reads a path to a YAML file and compiles it. A set of ready-to-copy
+// examples lives under `examples/blueprints/` in the repo (they are not compiled
+// into the binary); point `--blueprint` at one of those, or at your own file.
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 
 use super::Graph;
 use super::yaml::from_yaml;
 
-/// The blueprints that ship with boitata: `(name, embedded YAML source)`. The
-/// sources live under `blueprints/` and are compiled into the binary so the
-/// starters work with no files on disk.
-const STARTERS: &[(&str, &str)] = &[
-    ("default", include_str!("../blueprints/default.yaml")),
-    (
-        "fix_lint_errors",
-        include_str!("../blueprints/fix_lint_errors.yaml"),
-    ),
-    (
-        "fix_test_failure",
-        include_str!("../blueprints/fix_test_failure.yaml"),
-    ),
-    (
-        "setup_devbox",
-        include_str!("../blueprints/setup_devbox.yaml"),
-    ),
-    (
-        "human_approval",
-        include_str!("../blueprints/human_approval.yaml"),
-    ),
-    (
-        "containerized_task",
-        include_str!("../blueprints/containerized_task.yaml"),
-    ),
-];
-
-/// Names of the built-in starter blueprints, for help and error messages.
-pub fn starter_names() -> Vec<&'static str> {
-    STARTERS.iter().map(|(name, _)| *name).collect()
+/// Resolve `path` to a compiled [`Graph`] by reading it as a YAML file on disk.
+/// Blueprints are always user-provided files; see `examples/blueprints/` for
+/// ready-to-copy starting points.
+pub fn load(path: &str) -> anyhow::Result<Graph> {
+    let file = Path::new(path);
+    if !file.is_file() {
+        bail!(
+            "blueprint file `{path}` not found (blueprints are YAML files; \
+             see examples/blueprints/ for ready-to-copy starting points)"
+        );
+    }
+    let src = fs::read_to_string(file)
+        .with_context(|| format!("failed to read blueprint file `{path}`"))?;
+    from_yaml(&src).with_context(|| format!("failed to load blueprint from `{path}`"))
 }
 
-/// Resolve `name_or_path` to a compiled [`Graph`]: a built-in starter if the
-/// name matches one, otherwise a path to a YAML file on disk.
-pub fn load(name_or_path: &str) -> anyhow::Result<Graph> {
-    if let Some((_, src)) = STARTERS.iter().find(|(name, _)| *name == name_or_path) {
-        // A broken embedded starter is a build-time bug, not user error; the
-        // `starters_all_load` test guards against it.
-        return from_yaml(src)
-            .with_context(|| format!("built-in blueprint `{name_or_path}` is invalid"));
-    }
-
-    // Only treat the input as a file path when it looks like one — a path
-    // separator or a `.yaml`/`.yml` extension. This keeps a mistyped starter
-    // name (e.g. `deafult`) from being silently resolved against the filesystem
-    // and reported as a missing file rather than an unknown blueprint.
-    let path = Path::new(name_or_path);
-    let looks_like_path = name_or_path.contains('/')
-        // `\` is only a path separator on Windows; on Unix it's a valid filename
-        // character, so a bare name containing one shouldn't look like a path.
-        || (cfg!(target_os = "windows") && name_or_path.contains('\\'))
-        || path
+/// Discover the blueprints in directory `dir`: a map from each `.yaml`/`.yml`
+/// file's stem to its path, sorted by name.
+///
+/// This is how a host exposes a *fixed, trusted* set of blueprints by name —
+/// e.g. `boitata-server --blueprints-dir`, which offers only these files and
+/// never resolves an arbitrary path from a network request. Each file is compiled
+/// up front so a malformed blueprint fails at startup, not when a user selects it.
+pub fn discover(dir: &Path) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+    let entries = fs::read_dir(dir)
+        .with_context(|| format!("failed to read blueprints directory `{}`", dir.display()))?;
+    let mut blueprints = BTreeMap::new();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("failed to read an entry in `{}`", dir.display()))?
+            .path();
+        let is_yaml = path
             .extension()
             .is_some_and(|ext| ext == "yaml" || ext == "yml");
-    if looks_like_path {
-        if !path.is_file() {
-            bail!("blueprint file `{name_or_path}` not found");
+        if !path.is_file() || !is_yaml {
+            continue;
         }
-        let src = fs::read_to_string(path)
-            .with_context(|| format!("failed to read blueprint file `{name_or_path}`"))?;
-        return from_yaml(&src)
-            .with_context(|| format!("failed to load blueprint from `{name_or_path}`"));
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .with_context(|| format!("blueprint file `{}` has a non-UTF-8 name", path.display()))?
+            .to_string();
+        let path_str = path
+            .to_str()
+            .with_context(|| format!("blueprint path `{}` is not valid UTF-8", path.display()))?;
+        // Compile now so a broken file surfaces at startup rather than at run time.
+        load(path_str)
+            .with_context(|| format!("blueprint `{name}` in `{}` is invalid", dir.display()))?;
+        blueprints.insert(name, path);
     }
-
-    bail!(
-        "unknown blueprint `{name_or_path}` (built-ins: {}); pass a path to a .yaml file to use your own",
-        starter_names().join(", ")
-    );
+    Ok(blueprints)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Every shipped example blueprint must parse and compile — catches a
+    /// malformed example at test time rather than when a user copies it.
     #[test]
-    fn starters_all_load() {
-        // Every embedded starter must parse and compile — catches a malformed
-        // shipped YAML at test time rather than when a user selects it.
-        for name in starter_names() {
-            load(name).unwrap_or_else(|e| panic!("starter `{name}` failed to load: {e:#}"));
+    fn example_blueprints_all_load() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/blueprints");
+        let entries = fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("examples/blueprints not found at {dir}: {e}"));
+        let mut count = 0;
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "yaml") {
+                count += 1;
+                let path_str = path
+                    .to_str()
+                    .unwrap_or_else(|| panic!("non-UTF-8 example path: {}", path.display()));
+                load(path_str).unwrap_or_else(|e| {
+                    panic!("example `{}` failed to load: {e:#}", path.display())
+                });
+            }
         }
+        assert!(count > 0, "no example blueprints found in {dir}");
     }
 
     #[test]
-    fn starters_match_blueprints_dir() {
-        // Guard against drift the other way: a `.yaml` added under `blueprints/`
-        // but not listed in `STARTERS` (so it would ship unreachable by name).
-        // BTreeSet so a mismatch lists entries in a stable, sorted order.
-        use std::collections::BTreeSet;
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/blueprints");
-        let on_disk: BTreeSet<String> = fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("blueprints dir not found at {dir}: {e}"))
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
-            .filter_map(|path| path.file_stem()?.to_str().map(str::to_string))
-            .collect();
-        let registered: BTreeSet<String> = starter_names()
-            .iter()
-            .map(|name| name.to_string())
-            .collect();
+    fn discover_maps_names_to_paths_and_validates() {
+        // A directory of blueprints is discovered by stem, sorted, and each file
+        // is compiled (so a broken one is rejected up front).
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("beta.yaml"),
+            "name: b\nentry: a\nnodes:\n  a: {type: tool, tool: cargo_fmt}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("alpha.yml"),
+            "name: a\nentry: a\nnodes:\n  a: {type: tool, tool: cargo_fmt}\n",
+        )
+        .unwrap();
+        // A non-YAML file is ignored.
+        fs::write(dir.path().join("notes.txt"), "ignore me").unwrap();
+
+        let found = discover(dir.path()).unwrap();
         assert_eq!(
-            on_disk, registered,
-            "blueprints/ directory and STARTERS are out of sync"
+            found.keys().cloned().collect::<Vec<_>>(),
+            vec!["alpha".to_string(), "beta".to_string()]
         );
-    }
+        assert!(found["beta"].ends_with("beta.yaml"));
 
-    #[test]
-    fn unknown_name_errors_and_lists_starters() {
-        let err = load("does_not_exist").err().unwrap().to_string();
-        assert!(err.contains("unknown blueprint"), "{err}");
-        assert!(err.contains("default"), "{err}");
+        // A malformed blueprint fails discovery (not silently skipped).
+        fs::write(
+            dir.path().join("broken.yaml"),
+            "name: x\nentry: nope\nnodes: {}\n",
+        )
+        .unwrap();
+        assert!(discover(dir.path()).is_err());
     }
 
     #[test]
     fn missing_path_reports_file_not_found() {
-        // A path-shaped argument that doesn't exist is a missing file, not an
-        // "unknown blueprint" (which is reserved for bare-name typos).
         let err = load("./nope.yaml").err().unwrap().to_string();
         assert!(err.contains("not found"), "{err}");
-        assert!(!err.contains("unknown blueprint"), "{err}");
     }
 
     #[test]

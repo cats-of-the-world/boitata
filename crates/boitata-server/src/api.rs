@@ -37,8 +37,10 @@ pub fn router(state: AppState) -> Router {
         .fallback(crate::assets::static_handler)
 }
 
-/// Request body for starting a run. `blueprint` is a built-in name (or a path to
-/// a `.yaml`); omit it to run the single-agent path.
+/// Request body for starting a run. `blueprint` is the *name* of one of the
+/// server's configured blueprints (see `--blueprints-dir`); omit it to run the
+/// single-agent path. An unknown name — or any name when none are configured — is
+/// rejected. Only these vetted names are accepted, never a filesystem path.
 #[derive(Debug, Deserialize)]
 struct StartRun {
     task: String,
@@ -62,17 +64,25 @@ async fn create_run(
     if req.task.trim().is_empty() {
         return Err(ApiError::bad_request("task must not be empty"));
     }
-    // Only accept built-in starter names over the network. `load` would also
-    // resolve arbitrary filesystem paths (`./x.yaml`, `/etc/…`), which would be a
-    // path-traversal / local-file-inclusion vector for a networked server.
-    if let Some(name) = &req.blueprint {
-        let starters = boitata_orchestrator::starter_names();
-        if !starters.contains(&name.as_str()) {
-            return Err(ApiError::bad_request(format!(
-                "unknown blueprint `{name}` (built-ins: {})",
-                starters.join(", ")
-            )));
-        }
+    // A blueprint is referenced by *name* and must be one the server was
+    // configured with (`--blueprints-dir`). Resolving an arbitrary path from a
+    // network request would be a path-traversal / local-file-inclusion vector, so
+    // only these vetted names are accepted.
+    if let Some(name) = &req.blueprint
+        && !app.blueprints.contains_key(name)
+    {
+        return Err(ApiError::bad_request(if app.blueprints.is_empty() {
+            format!(
+                "unknown blueprint `{name}`: the server has no blueprints configured \
+                 (start it with --blueprints-dir <dir>)"
+            )
+        } else {
+            let available: Vec<&str> = app.blueprints.keys().map(String::as_str).collect();
+            format!(
+                "unknown blueprint `{name}` (available: {})",
+                available.join(", ")
+            )
+        }));
     }
 
     let id = Uuid::new_v4();
@@ -198,7 +208,17 @@ async fn run_blueprint(
     task: String,
 ) -> anyhow::Result<RunResult> {
     let cfg = &app.config;
-    let graph = boitata_orchestrator::load(name)?;
+    // Resolve the name against the vetted catalog (create_run already checked it,
+    // but this keeps the network never able to pick an arbitrary path). Load from
+    // the file rather than a compiled cache so an edited blueprint is picked up.
+    let path = app
+        .blueprints
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("unknown blueprint `{name}`"))?;
+    let path = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("blueprint path for `{name}` is not valid UTF-8"))?;
+    let graph = boitata_orchestrator::load(path)?;
     let mut executor = Executor::new(app.provider.clone(), app.tools.clone())
         .with_policy((*app.policy).clone())
         .with_system_prompt(cfg.system_prompt.clone())
@@ -252,9 +272,12 @@ async fn cancel_run(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// `GET /api/blueprints` — the built-in starter names, for the UI dropdown.
-async fn list_blueprints() -> Json<Vec<&'static str>> {
-    Json(boitata_orchestrator::starter_names())
+/// `GET /api/blueprints` — the names of the blueprints the server can run (from
+/// `--blueprints-dir`), sorted. Empty when none are configured; the UI dropdown
+/// then offers only the single-agent path. These are the only names `POST
+/// /api/runs` accepts.
+async fn list_blueprints(State(app): State<AppState>) -> Json<Vec<String>> {
+    Json(app.blueprints.keys().cloned().collect())
 }
 
 /// `GET /api/runs/{id}/events` — Server-Sent Events. Replays the history buffer,
@@ -362,6 +385,13 @@ mod tests {
     /// An `AppState` backed by the (keyless) ollama provider so no network or API
     /// key is needed. The non-LLM endpoints under test never actually run a task.
     async fn test_state() -> AppState {
+        state_with_blueprints(std::collections::BTreeMap::new()).await
+    }
+
+    /// Like [`test_state`], but with a preconfigured blueprint catalog.
+    async fn state_with_blueprints(
+        blueprints: std::collections::BTreeMap<String, std::path::PathBuf>,
+    ) -> AppState {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("boitata.toml");
         std::fs::write(&path, "provider = \"ollama\"\nmodel = \"llama3\"\n").unwrap();
@@ -369,7 +399,7 @@ mod tests {
         let provider = runtime::build_provider(&config).unwrap();
         let tools = runtime::build_tools(&config).await.unwrap();
         let policy = runtime::build_policy(&config).unwrap();
-        AppState::new(config, provider, tools, policy)
+        AppState::new(config, provider, tools, policy, blueprints)
     }
 
     async fn body_json(resp: Response) -> serde_json::Value {
@@ -402,20 +432,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blueprints_lists_starters() {
+    async fn blueprints_lists_none() {
+        // The server hosts no blueprints (they are local YAML files run via the
+        // CLI), so the endpoint returns an empty list.
         let app = router(test_state().await);
         let resp = app
             .oneshot(Request::get("/api/blueprints").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let names = body_json(resp).await;
-        assert!(
-            names
-                .as_array()
-                .is_some_and(|a| a.iter().any(|n| n == "default")),
-            "expected `default` among starters, got {names}"
-        );
+        assert_eq!(body_json(resp).await, json!([]));
     }
 
     #[tokio::test]
@@ -436,6 +462,58 @@ mod tests {
     #[tokio::test]
     async fn unknown_blueprint_is_rejected() {
         let app = router(test_state().await);
+        let resp = app
+            .oneshot(
+                Request::post("/api/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "task": "x", "blueprint": "nope" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn configured_blueprints_are_listed_and_accepted() {
+        // With a blueprints catalog, the endpoint lists the names and a run
+        // referencing a known name is accepted (spawned), while an unknown one is
+        // still rejected.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tidy.yaml"),
+            "name: tidy\nentry: a\nnodes:\n  a: {type: tool, tool: cargo_fmt}\n",
+        )
+        .unwrap();
+        let catalog = boitata_orchestrator::discover(dir.path()).unwrap();
+        let app = router(state_with_blueprints(catalog).await);
+
+        // Listed.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/blueprints").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(body_json(resp).await, json!(["tidy"]));
+
+        // A known name is accepted.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "task": "x", "blueprint": "tidy" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        // An unknown name is rejected even when a catalog exists.
         let resp = app
             .oneshot(
                 Request::post("/api/runs")

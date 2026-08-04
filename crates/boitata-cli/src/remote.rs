@@ -145,13 +145,21 @@ fn format_event(tag: &str, ev: &Value) -> String {
             n("iterations"),
         ),
         "blueprint_started" => format!("▶ blueprint {} · entry {}", s("blueprint"), s("entry")),
-        "node_executed" => format!(
-            "◆ [{}] {} → {} ({})",
-            s("node"),
-            s("kind"),
-            s("next"),
-            s("status")
-        ),
+        "node_executed" => {
+            let status = s("status");
+            let output = s("output");
+            let mut line = format!(
+                "◆ [{}] {} → {} ({})",
+                s("node"),
+                s("kind"),
+                s("next"),
+                status
+            );
+            if !output.is_empty() {
+                line.push_str(&format!("\n    {}", truncate(&output, 500)));
+            }
+            line
+        }
         "super_step_retried" => format!(
             "↻ retry #{} at step {} · {}",
             n("attempt"),

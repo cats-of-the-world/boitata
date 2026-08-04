@@ -1,10 +1,12 @@
 # Run a task inside an ephemeral container: provision a container, git-clone the
-# repo given as {task} into it, and run its tests there — a stand-in for
+# `repo` declared below into it, and run its tests there — a stand-in for
 # delegating to an in-container agent. The container is destroyed automatically
 # when the run ends (success, failure, or cancel).
 #
-# {task} must be a git repo URL. The image must ship git and the toolchain the
-# `run` step needs. Requires a running Docker daemon.
+# The repo to clone is a field of the `clone` node (edit it below), not the run's
+# {task} — the task string is the agent's prompt, so it needn't be a URL. Use an
+# HTTPS URL: the container has no SSH credentials. The image must ship git and the
+# toolchain the `run` step needs. Requires a running Docker daemon.
 name: containerized_task
 entry: provision
 nodes:
@@ -14,7 +16,7 @@ nodes:
   clone:
     type: checkout
     container: "{provision}"
-    repo: "{task}"
+    repo: "https://github.com/BurntSushi/byteorder.git"
     path: /workspace
   test:
     type: exec
