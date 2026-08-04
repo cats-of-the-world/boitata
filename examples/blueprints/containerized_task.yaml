@@ -14,6 +14,11 @@
 # drive over ACP) — so point `image` at a purpose-built image, not a stock one.
 # Build the matching image from the repo root:
 #   docker build -f examples/boitata-agent-rust.Dockerfile -t boitata-agent-rust:latest .
+#
+# The in-container agent needs its LLM credentials: `provision.env` lists the
+# variable *names* to forward, and their values are read from the orchestrator's
+# environment at run time — never written in this file, shown in the graph view,
+# or logged. Set the named vars (e.g. `ANTHROPIC_API_KEY`) where you run boitata.
 # Requires a running Docker daemon.
 name: containerized_task
 entry: provision
@@ -21,6 +26,7 @@ nodes:
   provision:
     type: provision
     image: "boitata-agent-rust:latest"
+    env: [ANTHROPIC_API_KEY]
   clone:
     type: checkout
     container: "{provision}"

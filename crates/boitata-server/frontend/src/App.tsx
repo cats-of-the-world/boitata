@@ -70,13 +70,7 @@ export function App() {
             }}
           />
           {error && <div className="error">{error}</div>}
-          <RunList
-            runs={runs}
-            selected={selected}
-            onSelect={(id) => {
-              setSelected(id);
-            }}
-          />
+          <RunList runs={runs} selected={selected} onSelect={setSelected} />
         </aside>
         <main>
           {selected ? (
@@ -331,16 +325,26 @@ function BlueprintGraphView({ name }: { name: string }) {
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
+    // Guard against a stale response: if `name` changes before the fetch
+    // resolves, ignore the earlier result so it can't overwrite the newer graph.
+    let cancelled = false;
     setGraph(null);
     setErr(null);
     setSelected(null);
     api
       .getBlueprint(name)
       .then((g) => {
+        if (cancelled) return;
         setGraph(g);
         setSelected(g.entry); // show the entry step's config by default
       })
-      .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+      .catch((e) => {
+        if (cancelled) return;
+        setErr(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [name]);
 
   if (err) return <div className="error">Failed to load blueprint: {err}</div>;
@@ -500,8 +504,11 @@ function BlueprintGraphSvg({
     };
   };
 
-  const whenClass = (when: string | null) =>
-    when === "success" ? "ok" : when === "failure" ? "err" : "plain";
+  const whenClass = (when: string | null) => {
+    if (when === "success") return "ok";
+    if (when === "failure") return "err";
+    return "plain";
+  };
 
   return (
     <div className="bp-canvas" style={{ width, height }}>

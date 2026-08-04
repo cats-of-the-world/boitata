@@ -62,14 +62,39 @@ fn shell_quote(value: &str) -> String {
 pub struct ProvisionNode {
     name: String,
     image: String,
+    /// Names of environment variables to forward from the orchestrator's own
+    /// environment into the sandbox (e.g. `ANTHROPIC_API_KEY` for an in-sandbox
+    /// agent). Only names live here and in the blueprint — the values are read
+    /// from the process environment at run time, so a secret is never stored in a
+    /// blueprint, shown in the graph view, or logged.
+    env: Vec<String>,
 }
 
 impl ProvisionNode {
-    pub fn new(name: impl Into<String>, image: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, image: impl Into<String>, env: Vec<String>) -> Self {
         Self {
             name: name.into(),
             image: image.into(),
+            env,
         }
+    }
+
+    /// Resolve the configured env var *names* to `(name, value)` pairs from the
+    /// process environment. A requested variable that isn't set is skipped with a
+    /// warning that names it only — the value is never touched or logged.
+    fn resolve_env(&self) -> Vec<(String, String)> {
+        let mut resolved = Vec::with_capacity(self.env.len());
+        for name in &self.env {
+            match std::env::var(name) {
+                Ok(value) => resolved.push((name.clone(), value)),
+                Err(_) => tracing::warn!(
+                    "provision node `{}`: env var `{name}` is not set in the \
+                     environment; not forwarding it",
+                    self.name
+                ),
+            }
+        }
+        resolved
     }
 }
 
@@ -84,7 +109,8 @@ impl Node for ProvisionNode {
 
     async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
         let image = render(&self.image, state);
-        let id = cx.sandbox.provision(&image, &cx.cancel).await?;
+        let env = self.resolve_env();
+        let id = cx.sandbox.provision(&image, &env, &cx.cancel).await?;
         Ok(Update::from_node(&self.name, id, Status::Ok))
     }
 }
@@ -376,6 +402,29 @@ mod tests {
         let argv = checkout_command("; rm -rf /", "/w", None);
         assert_eq!(argv[2], "git clone '; rm -rf /' '/w'");
         assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+    }
+
+    #[test]
+    fn resolve_env_forwards_set_vars_by_name() {
+        // The value is read from the process environment at run time (never from
+        // the blueprint). `PATH` is set in any environment we run in.
+        let node = ProvisionNode::new("box", "img", vec!["PATH".to_string()]);
+        let resolved = node.resolve_env();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0, "PATH");
+        assert!(!resolved[0].1.is_empty());
+    }
+
+    #[test]
+    fn resolve_env_skips_unset_vars() {
+        // A requested-but-unset variable is dropped (with a name-only warning),
+        // never forwarded as an empty value.
+        let node = ProvisionNode::new(
+            "box",
+            "img",
+            vec!["BOITATA_DEFINITELY_UNSET_ENV_9c3f2a".to_string()],
+        );
+        assert!(node.resolve_env().is_empty());
     }
 
     #[test]

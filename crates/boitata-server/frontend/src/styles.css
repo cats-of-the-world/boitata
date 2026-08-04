@@ -9,6 +9,10 @@
   --ok: #4ec9a5;
   --err: #e5635b;
   --info: #5aa2f0;
+  /* Blueprint-graph node accents by execution class. */
+  --prob: #b794f6; /* probabilistic / LLM */
+  --det: #5aa2f0; /* deterministic */
+  --human: #e0a458; /* human-in-the-loop */
 }
 
 * { box-sizing: border-box; }
@@ -136,12 +140,6 @@ button.cancel { margin: 0 0 0 auto; padding: 5px 12px; font-size: 13px; }
 .transcript strong { color: var(--accent); }
 
 /* ---- Blueprint graph ---- */
-:root {
-  --prob: #b794f6;   /* probabilistic / LLM */
-  --det: #5aa2f0;    /* deterministic */
-  --human: #e0a458;  /* human-in-the-loop */
-}
-
 .bp { display: flex; flex-direction: column; gap: 12px; }
 .bp-title { display: flex; align-items: baseline; gap: 10px; }
 .bp-title strong { font-size: 15px; }

@@ -53,7 +53,12 @@ struct FakeSandbox {
 }
 #[async_trait]
 impl Sandbox for FakeSandbox {
-    async fn provision(&self, image: &str, _c: &CancellationToken) -> anyhow::Result<String> {
+    async fn provision(
+        &self,
+        image: &str,
+        _env: &[(String, String)],
+        _c: &CancellationToken,
+    ) -> anyhow::Result<String> {
         Ok(format!("fake-{image}"))
     }
     async fn exec(

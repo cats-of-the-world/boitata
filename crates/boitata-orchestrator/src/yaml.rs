@@ -69,8 +69,15 @@ enum NodeDef {
         mode: HumanMode,
     },
     /// Create an ephemeral container from `image`. Its output (the container id)
-    /// is stored under the node name for downstream `{name}` references.
-    Provision { image: String },
+    /// is stored under the node name for downstream `{name}` references. `env` is
+    /// a list of environment variable *names* to forward from the orchestrator's
+    /// environment into the container (values are read at run time — never written
+    /// in the blueprint), e.g. an API key an in-container agent needs.
+    Provision {
+        image: String,
+        #[serde(default)]
+        env: Vec<String>,
+    },
     /// Git-clone `repo` into `container` (a `{node}` reference to a provision
     /// node). `ref` and `path` are optional (`path` defaults to `/workspace`).
     Checkout {
@@ -157,7 +164,7 @@ impl NodeDef {
             NodeDef::Tool { tool, .. } => Some(tool.clone()),
             NodeDef::Script { run } => Some(run.clone()),
             NodeDef::Human { prompt, .. } => Some(prompt.clone()),
-            NodeDef::Provision { image } => Some(image.clone()),
+            NodeDef::Provision { image, .. } => Some(image.clone()),
             NodeDef::Checkout { repo, .. } => Some(repo.clone()),
             NodeDef::Exec { run, .. } => Some(run.clone()),
         }
@@ -183,19 +190,34 @@ impl NodeDef {
                 let mut c = vec![f("tool", tool.clone())];
                 let empty = args.as_object().is_some_and(|o| o.is_empty());
                 if !args.is_null() && !empty {
-                    c.push(f(
-                        "args",
-                        serde_json::to_string_pretty(args).unwrap_or_default(),
-                    ));
+                    // Pretty JSON for readability; fall back to the compact form
+                    // (both are infallible for a `Value`) rather than an empty
+                    // string, so the field is never silently blanked.
+                    let rendered =
+                        serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
+                    c.push(f("args", rendered));
                 }
                 c
             }
             NodeDef::Script { run } => vec![f("run", run.clone())],
-            NodeDef::Human { prompt, mode } => vec![
-                f("prompt", prompt.clone()),
-                f("mode", format!("{mode:?}").to_lowercase()),
-            ],
-            NodeDef::Provision { image } => vec![f("image", image.clone())],
+            NodeDef::Human { prompt, mode } => {
+                // Match explicitly rather than deriving from `Debug`, so the wire
+                // string doesn't silently change if a variant is renamed.
+                let mode = match mode {
+                    HumanMode::Input => "input",
+                    HumanMode::Approval => "approval",
+                };
+                vec![f("prompt", prompt.clone()), f("mode", mode.to_string())]
+            }
+            NodeDef::Provision { image, env } => {
+                let mut c = vec![f("image", image.clone())];
+                // Only the variable *names* are shown — the blueprint never holds
+                // their (possibly secret) values.
+                if !env.is_empty() {
+                    c.push(f("env", env.join(", ")));
+                }
+                c
+            }
             NodeDef::Checkout {
                 container,
                 repo,
@@ -287,9 +309,12 @@ pub struct BlueprintEdgeInfo {
 }
 
 /// Describe a blueprint's shape from its YAML source, for visualization. Parses
-/// (and so validates the schema of) the document, but does not compile it — see
-/// [`from_yaml`] for that. Nodes are ordered entry-first, then by name, so the
-/// output is stable.
+/// the document (so a schema error — a bad field or node `type` — is caught), but
+/// does *not* compile it, so graph-level checks (unknown edge targets, routing
+/// conflicts) are not applied — see [`from_yaml`] for those. Callers that only
+/// describe blueprints they've already loaded (e.g. the server, which compiles
+/// every blueprint at startup) get both. Nodes are ordered entry-first, then by
+/// name, so the output is stable.
 pub fn describe(src: &str) -> anyhow::Result<BlueprintGraph> {
     let def: BlueprintDef =
         serde_norway::from_str(src).context("failed to parse blueprint YAML")?;
@@ -376,7 +401,7 @@ fn add_node(builder: GraphBuilder, name: String, node: NodeDef) -> GraphBuilder 
         NodeDef::Tool { tool, args } => builder.node(ToolNode::new(name, tool, args)),
         NodeDef::Script { run } => builder.node(ScriptNode::new(name, run)),
         NodeDef::Human { prompt, mode } => builder.node(HumanNode::new(name, prompt, mode)),
-        NodeDef::Provision { image } => builder.node(ProvisionNode::new(name, image)),
+        NodeDef::Provision { image, env } => builder.node(ProvisionNode::new(name, image, env)),
         NodeDef::Checkout {
             container,
             repo,
@@ -567,6 +592,28 @@ edges:
     #[test]
     fn describe_rejects_invalid_yaml() {
         assert!(describe("not: [a blueprint").is_err());
+    }
+
+    #[test]
+    fn describe_provision_shows_env_names_only() {
+        // A provision node's `env` lists variable *names*; the config view shows
+        // those names (never values, which the blueprint doesn't contain).
+        let src = r#"
+name: c
+entry: box
+nodes:
+  box: {type: provision, image: "img", env: [ANTHROPIC_API_KEY, OPENAI_API_KEY]}
+edges:
+  - {from: box, to: END}
+"#;
+        let g = describe(src).unwrap();
+        let node = g.nodes.iter().find(|n| n.id == "box").unwrap();
+        let env = node
+            .config
+            .iter()
+            .find(|c| c.key == "env")
+            .expect("env field in config");
+        assert_eq!(env.value, "ANTHROPIC_API_KEY, OPENAI_API_KEY");
     }
 
     #[test]
