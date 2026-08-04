@@ -183,18 +183,25 @@ impl NodeDef {
                 let mut c = vec![f("tool", tool.clone())];
                 let empty = args.as_object().is_some_and(|o| o.is_empty());
                 if !args.is_null() && !empty {
-                    c.push(f(
-                        "args",
-                        serde_json::to_string_pretty(args).unwrap_or_default(),
-                    ));
+                    // Pretty JSON for readability; fall back to the compact form
+                    // (both are infallible for a `Value`) rather than an empty
+                    // string, so the field is never silently blanked.
+                    let rendered =
+                        serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
+                    c.push(f("args", rendered));
                 }
                 c
             }
             NodeDef::Script { run } => vec![f("run", run.clone())],
-            NodeDef::Human { prompt, mode } => vec![
-                f("prompt", prompt.clone()),
-                f("mode", format!("{mode:?}").to_lowercase()),
-            ],
+            NodeDef::Human { prompt, mode } => {
+                // Match explicitly rather than deriving from `Debug`, so the wire
+                // string doesn't silently change if a variant is renamed.
+                let mode = match mode {
+                    HumanMode::Input => "input",
+                    HumanMode::Approval => "approval",
+                };
+                vec![f("prompt", prompt.clone()), f("mode", mode.to_string())]
+            }
             NodeDef::Provision { image } => vec![f("image", image.clone())],
             NodeDef::Checkout {
                 container,
@@ -287,9 +294,12 @@ pub struct BlueprintEdgeInfo {
 }
 
 /// Describe a blueprint's shape from its YAML source, for visualization. Parses
-/// (and so validates the schema of) the document, but does not compile it — see
-/// [`from_yaml`] for that. Nodes are ordered entry-first, then by name, so the
-/// output is stable.
+/// the document (so a schema error — a bad field or node `type` — is caught), but
+/// does *not* compile it, so graph-level checks (unknown edge targets, routing
+/// conflicts) are not applied — see [`from_yaml`] for those. Callers that only
+/// describe blueprints they've already loaded (e.g. the server, which compiles
+/// every blueprint at startup) get both. Nodes are ordered entry-first, then by
+/// name, so the output is stable.
 pub fn describe(src: &str) -> anyhow::Result<BlueprintGraph> {
     let def: BlueprintDef =
         serde_norway::from_str(src).context("failed to parse blueprint YAML")?;

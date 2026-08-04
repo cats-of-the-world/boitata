@@ -293,7 +293,8 @@ async fn get_blueprint(
         .blueprints
         .get(&name)
         .ok_or_else(|| ApiError::not_found_msg(format!("unknown blueprint `{name}`")))?;
-    let src = std::fs::read_to_string(path)
+    let src = tokio::fs::read_to_string(path)
+        .await
         .map_err(|e| ApiError::internal(format!("failed to read blueprint `{name}`: {e}")))?;
     let graph = boitata_orchestrator::describe(&src)
         .map_err(|e| ApiError::internal(format!("blueprint `{name}` is invalid: {e:#}")))?;
