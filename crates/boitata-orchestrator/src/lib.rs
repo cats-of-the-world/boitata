@@ -101,6 +101,24 @@ struct RanNode {
     output: String,
 }
 
+/// A hard error from a super-step, tagged with the node that produced it and its
+/// kind. Attached as [`anyhow`] context by [`Executor::run_frontier`] so
+/// `run_graph` can recover the node's identity (via `downcast_ref`) and surface
+/// the failure as a `NodeExecuted` audit event — otherwise a hard error leaves no
+/// trace in the stream between "started" and "finished". Its `Display` is the same
+/// message the plain context string used, so error output is unchanged.
+#[derive(Debug)]
+struct NodeFailure {
+    node: String,
+    kind: NodeKind,
+}
+
+impl std::fmt::Display for NodeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "blueprint node `{}` failed", self.node)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum BlueprintError {
     #[error("blueprint graph is invalid: {0}")]
@@ -569,6 +587,23 @@ impl Executor {
                             }
                         }
                         Err(e) => {
+                            // Surface the failing node's error as a node event so
+                            // the reason is visible in the stream — a hard error
+                            // otherwise leaves nothing between "started" and
+                            // "finished". The node's identity rides on the error as
+                            // `NodeFailure` context (see `run_frontier`).
+                            if let Some(f) = e.downcast_ref::<NodeFailure>() {
+                                let (node, kind) = (f.node.clone(), f.kind);
+                                let output = format!("{e:#}");
+                                self.emit(move || AuditEvent::NodeExecuted {
+                                    step: step + 1,
+                                    node,
+                                    kind,
+                                    status: NodeStatus::Failed,
+                                    next: display_routes(&[]),
+                                    output,
+                                });
+                            }
                             self.emit(|| AuditEvent::BlueprintCompleted {
                                 steps: step + 1,
                                 reason: CompletionReason::Error,
@@ -705,7 +740,10 @@ impl Executor {
                     Err(e) => {
                         let mut slot = first_error.lock().expect("first_error mutex poisoned");
                         if slot.is_none() {
-                            *slot = Some(e.context(format!("blueprint node `{name}` failed")));
+                            *slot = Some(e.context(NodeFailure {
+                                node: name.clone(),
+                                kind: node.kind(),
+                            }));
                             child.cancel();
                         }
                         None
@@ -933,6 +971,62 @@ mod tests {
         assert!(
             output.contains("could not read remote repository"),
             "NodeExecuted.output should carry the failure reason; got {output:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_node_error_is_audited() {
+        // A node that returns a hard `Err` (e.g. a provision step whose image
+        // can't be pulled) must still surface a `NodeExecuted` (Failed) event
+        // carrying the error, so the reason is visible in the stream rather than
+        // only a bare `blueprint finished · error`.
+        struct Boom;
+        #[async_trait]
+        impl Node for Boom {
+            fn name(&self) -> &str {
+                "provision"
+            }
+            fn kind(&self) -> NodeKind {
+                NodeKind::Container
+            }
+            async fn run(&self, _s: &State, _c: &NodeCtx<'_>) -> anyhow::Result<Update> {
+                anyhow::bail!("failed to pull image `nope:latest`: not found")
+            }
+        }
+
+        let graph = Graph::builder("g", "provision")
+            .node(Boom)
+            .edge("provision", END)
+            .build()
+            .unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let err = executor()
+            .with_audit(sink.clone())
+            .run(&graph, "t".into())
+            .await
+            .unwrap_err();
+        // The error still propagates, with the node named.
+        assert!(format!("{err:#}").contains("provision"), "{err:#}");
+
+        let (status, output) = sink
+            .0
+            .lock()
+            .iter()
+            .find_map(|e| match e {
+                AuditEvent::NodeExecuted {
+                    node,
+                    status,
+                    output,
+                    ..
+                } if node == "provision" => Some((*status, output.clone())),
+                _ => None,
+            })
+            .expect("a NodeExecuted event for the failed provision node");
+        assert_eq!(status, NodeStatus::Failed);
+        assert!(
+            output.contains("failed to pull image"),
+            "hard-error output should carry the reason; got {output:?}"
         );
     }
 
