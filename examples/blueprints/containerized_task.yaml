@@ -17,10 +17,15 @@
 # published):
 #   docker build -f examples/boitata-agent-rust.Dockerfile -t boitata-agent-rust:latest .
 #
-# The in-container agent needs its LLM credentials: `provision.env` lists the
-# variable *names* to forward, and their values are read from the orchestrator's
+# The in-container agent needs its LLM credentials. `provision.env` lists the
+# variable *names* to forward; their values are read from the orchestrator's
 # environment at run time — never written in this file, shown in the graph view,
-# or logged. Set the named vars (e.g. `ANTHROPIC_API_KEY`) where you run boitata.
+# or logged. boitata reads its key from `BOITATA_API_KEY` (not the provider's own
+# `ANTHROPIC_API_KEY`), so set that where you run boitata, mapping if needed:
+#   BOITATA_API_KEY="$ANTHROPIC_API_KEY" boitata run … --blueprint …/containerized_task.yaml
+# The agent also needs its config to select the provider (`provider = "anthropic"`,
+# a `model`) — bake that into the image (see the Dockerfile). No key goes in the
+# image; it arrives via the forwarded `BOITATA_API_KEY`.
 # Requires a running Docker daemon.
 name: containerized_task
 entry: provision
@@ -28,7 +33,7 @@ nodes:
   provision:
     type: provision
     image: "boitata-agent-rust:latest"
-    env: [ANTHROPIC_API_KEY]
+    env: [BOITATA_API_KEY]
   clone:
     type: checkout
     container: "{provision}"

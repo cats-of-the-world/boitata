@@ -29,8 +29,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/boitata-agent /usr/local/bin/boitata-agent
 
-# A keyless placeholder provider so `boitata-agent` starts without baked secrets.
-# Replace this (or point $BOITATA_CONFIG elsewhere) and pass credentials at run
-# time for a real LLM.
-RUN printf 'provider = "ollama"\nmodel = "llama3"\n' > /etc/boitata.toml
+# The agent's config selects the provider and model; no key is baked in — it's
+# supplied at run time via the `BOITATA_API_KEY` environment variable (forwarded
+# by the blueprint's `provision.env`). Edit provider/model to taste.
+RUN printf 'provider = "anthropic"\nmodel = "claude-sonnet-5"\n' > /etc/boitata.toml
 ENV BOITATA_CONFIG=/etc/boitata.toml
