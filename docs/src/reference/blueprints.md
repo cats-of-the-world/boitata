@@ -59,7 +59,7 @@ Every node is tagged by `type` (snake_case):
 | `tool` | `tool`, `args?` | Invoke a registered tool with arguments (defaults to `{}`) |
 | `script` | `run` | Run a shell script deterministically, routing on its exit code |
 | `human` | `prompt`, `mode?` | Pause for human input (human-in-the-loop); `mode` defaults to `input` |
-| `provision` | `image` | Create an ephemeral sandbox from `image`; its output is the sandbox id, referenced downstream as `{name}` |
+| `provision` | `image`, `env?` | Create an ephemeral sandbox from `image`; its output is the sandbox id, referenced downstream as `{name}`. `env` is a list of variable *names* to forward into the sandbox (see below) |
 | `checkout` | `container`, `repo`, `ref?`, `path?` | `git clone` a repo into a sandbox (`path` defaults to `/workspace`) |
 | `exec` | `container`, `run`, `workdir?` | Run a shell command inside a sandbox, routing on its exit code |
 | `agent_sandbox` | `container`, `prompt`, `port?`, `command?` | Run the agent **inside** the sandbox over ACP, streaming its events into the run |
@@ -67,6 +67,13 @@ Every node is tagged by `type` (snake_case):
 The last four move a run off the host into an isolated sandbox — see
 [Sandboxed Execution](../concepts/sandboxed-execution.md). A sandbox a run
 provisions is destroyed automatically when the run ends.
+
+**Forwarding secrets into a sandbox.** A `provision` node's `env` lists environment
+variable *names* (e.g. `env: [ANTHROPIC_API_KEY]`); their **values are read from
+the orchestrator's environment at run time** and injected into the container's
+environment only. A value is never written in the blueprint, shown in the graph
+view (which displays the names), or logged — so set the named variables where you
+run boitata, and keep secrets out of the YAML.
 
 ### Prompts
 

@@ -33,7 +33,18 @@ pub use docker::DockerSandbox;
 pub trait Sandbox: Send + Sync {
     /// Create and start an environment, returning an opaque id. Must not leave a
     /// half-provisioned environment behind on failure.
-    async fn provision(&self, image: &str, cancel: &CancellationToken) -> anyhow::Result<String>;
+    ///
+    /// `env` is a set of already-resolved `(name, value)` environment variables to
+    /// inject into the environment. These values may be **secrets** (e.g. an API
+    /// key the in-sandbox agent needs), so an implementation must pass them only to
+    /// the sandbox's own environment — never log them, echo them onto a command
+    /// line, or include them in any error.
+    async fn provision(
+        &self,
+        image: &str,
+        env: &[(String, String)],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<String>;
 
     /// Run `argv` inside sandbox `id`, returning `(exit_code, combined output)`.
     /// Output is captured into memory; implementations should cap it so a verbose
@@ -83,12 +94,16 @@ impl Sandboxes {
     /// rather than being force-dropped mid-call), so the id is always recorded;
     /// a hard task-abort mid-`provision` is out of scope and would be handled by
     /// label-based orphan reaping, not client-side tracking.
+    ///
+    /// `env` carries already-resolved `(name, value)` pairs to inject; values may
+    /// be secrets and are forwarded straight to the backend, never logged here.
     pub async fn provision(
         &self,
         image: &str,
+        env: &[(String, String)],
         cancel: &CancellationToken,
     ) -> anyhow::Result<String> {
-        let id = self.backend.provision(image, cancel).await?;
+        let id = self.backend.provision(image, env, cancel).await?;
         self.provisioned.lock().unwrap().push(id.clone());
         Ok(id)
     }
@@ -139,7 +154,12 @@ mod tests {
 
     #[async_trait]
     impl Sandbox for FakeSandbox {
-        async fn provision(&self, image: &str, _c: &CancellationToken) -> anyhow::Result<String> {
+        async fn provision(
+            &self,
+            image: &str,
+            _env: &[(String, String)],
+            _c: &CancellationToken,
+        ) -> anyhow::Result<String> {
             let n = self.counter.fetch_add(1, Ordering::Relaxed);
             Ok(format!("{image}-{n}"))
         }
@@ -167,8 +187,8 @@ mod tests {
         let sandboxes = Sandboxes::new(backend.clone());
         let cancel = CancellationToken::new();
 
-        let a = sandboxes.provision("img", &cancel).await.unwrap();
-        let b = sandboxes.provision("img", &cancel).await.unwrap();
+        let a = sandboxes.provision("img", &[], &cancel).await.unwrap();
+        let b = sandboxes.provision("img", &[], &cancel).await.unwrap();
         sandboxes.cleanup_all().await;
 
         let mut destroyed = backend.destroyed.lock().unwrap().clone();

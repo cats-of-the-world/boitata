@@ -47,7 +47,12 @@ impl DockerSandbox {
 
 #[async_trait]
 impl Sandbox for DockerSandbox {
-    async fn provision(&self, image: &str, cancel: &CancellationToken) -> anyhow::Result<String> {
+    async fn provision(
+        &self,
+        image: &str,
+        env: &[(String, String)],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<String> {
         let docker = self.docker().await?;
 
         // Pull the image (a no-op layer-wise if already present). Draining the
@@ -72,10 +77,19 @@ impl Sandbox for DockerSandbox {
         // entrypoint too (not just cmd), so an image with its own ENTRYPOINT
         // (e.g. `alpine/git`) doesn't turn this into `<entrypoint> sleep infinity`
         // and exit immediately.
+        // Inject the requested environment (as Docker's `KEY=VALUE` form). These
+        // values may be secrets, so they go only into the container's env here —
+        // never a log line, an error, or a command line. `env` is empty unless the
+        // provision node explicitly forwarded variables.
+        let container_env: Vec<String> = env
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect();
         let body = ContainerCreateBody {
             image: Some(image.to_string()),
             entrypoint: Some(vec!["sleep".to_string()]),
             cmd: Some(vec!["infinity".to_string()]),
+            env: (!container_env.is_empty()).then_some(container_env),
             ..Default::default()
         };
         let created = docker

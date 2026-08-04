@@ -69,8 +69,15 @@ enum NodeDef {
         mode: HumanMode,
     },
     /// Create an ephemeral container from `image`. Its output (the container id)
-    /// is stored under the node name for downstream `{name}` references.
-    Provision { image: String },
+    /// is stored under the node name for downstream `{name}` references. `env` is
+    /// a list of environment variable *names* to forward from the orchestrator's
+    /// environment into the container (values are read at run time — never written
+    /// in the blueprint), e.g. an API key an in-container agent needs.
+    Provision {
+        image: String,
+        #[serde(default)]
+        env: Vec<String>,
+    },
     /// Git-clone `repo` into `container` (a `{node}` reference to a provision
     /// node). `ref` and `path` are optional (`path` defaults to `/workspace`).
     Checkout {
@@ -157,7 +164,7 @@ impl NodeDef {
             NodeDef::Tool { tool, .. } => Some(tool.clone()),
             NodeDef::Script { run } => Some(run.clone()),
             NodeDef::Human { prompt, .. } => Some(prompt.clone()),
-            NodeDef::Provision { image } => Some(image.clone()),
+            NodeDef::Provision { image, .. } => Some(image.clone()),
             NodeDef::Checkout { repo, .. } => Some(repo.clone()),
             NodeDef::Exec { run, .. } => Some(run.clone()),
         }
@@ -202,7 +209,15 @@ impl NodeDef {
                 };
                 vec![f("prompt", prompt.clone()), f("mode", mode.to_string())]
             }
-            NodeDef::Provision { image } => vec![f("image", image.clone())],
+            NodeDef::Provision { image, env } => {
+                let mut c = vec![f("image", image.clone())];
+                // Only the variable *names* are shown — the blueprint never holds
+                // their (possibly secret) values.
+                if !env.is_empty() {
+                    c.push(f("env", env.join(", ")));
+                }
+                c
+            }
             NodeDef::Checkout {
                 container,
                 repo,
@@ -386,7 +401,7 @@ fn add_node(builder: GraphBuilder, name: String, node: NodeDef) -> GraphBuilder 
         NodeDef::Tool { tool, args } => builder.node(ToolNode::new(name, tool, args)),
         NodeDef::Script { run } => builder.node(ScriptNode::new(name, run)),
         NodeDef::Human { prompt, mode } => builder.node(HumanNode::new(name, prompt, mode)),
-        NodeDef::Provision { image } => builder.node(ProvisionNode::new(name, image)),
+        NodeDef::Provision { image, env } => builder.node(ProvisionNode::new(name, image, env)),
         NodeDef::Checkout {
             container,
             repo,
@@ -577,6 +592,28 @@ edges:
     #[test]
     fn describe_rejects_invalid_yaml() {
         assert!(describe("not: [a blueprint").is_err());
+    }
+
+    #[test]
+    fn describe_provision_shows_env_names_only() {
+        // A provision node's `env` lists variable *names*; the config view shows
+        // those names (never values, which the blueprint doesn't contain).
+        let src = r#"
+name: c
+entry: box
+nodes:
+  box: {type: provision, image: "img", env: [ANTHROPIC_API_KEY, OPENAI_API_KEY]}
+edges:
+  - {from: box, to: END}
+"#;
+        let g = describe(src).unwrap();
+        let node = g.nodes.iter().find(|n| n.id == "box").unwrap();
+        let env = node
+            .config
+            .iter()
+            .find(|c| c.key == "env")
+            .expect("env field in config");
+        assert_eq!(env.value, "ANTHROPIC_API_KEY, OPENAI_API_KEY");
     }
 
     #[test]
