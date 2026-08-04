@@ -12,7 +12,9 @@
 # The image must ship git, the toolchain the `test` step needs, AND the
 # `boitata-agent` binary on PATH (that's what the `agent_sandbox` nodes launch and
 # drive over ACP) — so point `image` at a purpose-built image, not a stock one.
-# Build the matching image from the repo root:
+# Build the matching image from the repo root (it stays local — provision uses a
+# locally-present image as-is and only pulls a *missing* one, so nothing is
+# published):
 #   docker build -f examples/boitata-agent-rust.Dockerfile -t boitata-agent-rust:latest .
 #
 # The in-container agent needs its LLM credentials: `provision.env` lists the
