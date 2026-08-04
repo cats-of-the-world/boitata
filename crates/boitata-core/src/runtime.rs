@@ -26,19 +26,21 @@ pub const DEFAULT_MAX_TOKENS: usize = 4096;
 /// `BOITATA_API_KEY` or the config file; Ollama needs no key.
 pub fn build_provider(config: &Config) -> anyhow::Result<Arc<dyn Provider>> {
     let max_tokens = config.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    // Resolve through the environment-aware accessors so `BOITATA_PROVIDER`,
+    // `BOITATA_MODEL`, and `BOITATA_BASE_URL` (like `BOITATA_API_KEY`) can override
+    // the file — the sandboxed agent is configured entirely by forwarded env vars.
+    let provider_name = config.resolve_provider();
+    let model = config.resolve_model();
+    let base_url = config.resolve_base_url();
 
-    let provider: Arc<dyn Provider> = match config.provider.as_str() {
+    let provider: Arc<dyn Provider> = match provider_name.as_str() {
         "anthropic" => {
             let api_key = config
                 .resolve_api_key()
                 .context("anthropic provider requires an api_key (config or BOITATA_API_KEY)")?;
             Arc::new(
-                AnthropicProvider::with_config(
-                    api_key,
-                    config.model.clone(),
-                    config.base_url.clone(),
-                )
-                .with_max_tokens(max_tokens),
+                AnthropicProvider::with_config(api_key, model, base_url)
+                    .with_max_tokens(max_tokens),
             )
         }
         "openai" => {
@@ -46,14 +48,12 @@ pub fn build_provider(config: &Config) -> anyhow::Result<Arc<dyn Provider>> {
                 .resolve_api_key()
                 .context("openai provider requires an api_key (config or BOITATA_API_KEY)")?;
             Arc::new(
-                OpenAIProvider::with_config(api_key, config.model.clone(), config.base_url.clone())
-                    .with_max_tokens(max_tokens),
+                OpenAIProvider::with_config(api_key, model, base_url).with_max_tokens(max_tokens),
             )
         }
-        "ollama" => Arc::new(
-            OllamaProvider::with_config(config.model.clone(), config.base_url.clone())
-                .with_max_tokens(max_tokens),
-        ),
+        "ollama" => {
+            Arc::new(OllamaProvider::with_config(model, base_url).with_max_tokens(max_tokens))
+        }
         other => bail!("unknown provider `{other}` (expected: anthropic, openai, ollama)"),
     };
 

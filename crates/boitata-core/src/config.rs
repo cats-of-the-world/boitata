@@ -11,10 +11,26 @@ use std::path::{Path, PathBuf};
 
 /// Environment variable holding an alternate config file path.
 const CONFIG_PATH_ENV: &str = "BOITATA_CONFIG";
-/// Environment variable overriding the API key (takes precedence over the file).
+/// Environment variables overriding config fields (each takes precedence over the
+/// file). Letting the provider be selected from the environment matters for the
+/// sandboxed agent: the blueprint forwards these into the container, so its image
+/// stays provider-agnostic and needs no rebuild to switch model or endpoint.
 const API_KEY_ENV: &str = "BOITATA_API_KEY";
+const PROVIDER_ENV: &str = "BOITATA_PROVIDER";
+const MODEL_ENV: &str = "BOITATA_MODEL";
+const BASE_URL_ENV: &str = "BOITATA_BASE_URL";
 /// Default config file name, looked up in the current directory.
 const DEFAULT_CONFIG_FILE: &str = "boitata.toml";
+
+/// A trimmed, non-blank value of environment variable `name`, or `None` if it's
+/// unset or all whitespace. Trimming guards against a stray trailing newline
+/// (common with `export VAR=$(cat file)`), which would otherwise be used verbatim.
+fn env_override(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
 
 /// Top-level Boitata configuration.
 ///
@@ -225,14 +241,30 @@ impl Config {
     }
 
     /// The API key to use: `BOITATA_API_KEY` if set, otherwise the file value.
+    /// Both are trimmed and a blank result is treated as absent, so the caller
+    /// surfaces the actionable "requires an api_key" error rather than sending an
+    /// empty (or newline-tainted) auth header and getting a confusing 401.
     pub fn resolve_api_key(&self) -> Option<String> {
-        // Treat a blank key (common in the committed template) as absent so the
-        // caller surfaces the actionable "requires an api_key" error rather than
-        // sending an empty `Authorization` header and getting a confusing 401.
-        std::env::var(API_KEY_ENV)
-            .ok()
+        env_override(API_KEY_ENV)
             .or_else(|| self.api_key.clone())
+            .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
+    }
+
+    /// The provider to use: `BOITATA_PROVIDER` if set, otherwise the file value.
+    pub fn resolve_provider(&self) -> String {
+        env_override(PROVIDER_ENV).unwrap_or_else(|| self.provider.clone())
+    }
+
+    /// The model to use: `BOITATA_MODEL` if set, otherwise the file value.
+    pub fn resolve_model(&self) -> String {
+        env_override(MODEL_ENV).unwrap_or_else(|| self.model.clone())
+    }
+
+    /// The provider base URL: `BOITATA_BASE_URL` if set, otherwise the file value
+    /// (e.g. `https://api.z.ai/api/paas/v4/chat/completions` for a z.ai endpoint).
+    pub fn resolve_base_url(&self) -> Option<String> {
+        env_override(BASE_URL_ENV).or_else(|| self.base_url.clone())
     }
 }
 
@@ -270,6 +302,27 @@ mod tests {
             Config::resolve_path(Some("custom.toml".to_string())),
             PathBuf::from("custom.toml")
         );
+    }
+
+    #[test]
+    fn resolvers_use_file_values_and_trim_the_key() {
+        // With no BOITATA_* overrides set, the resolvers return the file values;
+        // the API key is trimmed so a stray trailing newline can't taint the auth
+        // header. (Exercises the file path; the env override is `env_override`.)
+        let config: Config = toml::from_str(
+            "provider = \"openai\"\n\
+             model = \"glm-4.6\"\n\
+             base_url = \"https://api.z.ai/api/paas/v4/chat/completions\"\n\
+             api_key = \"  sk-test\\n\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.resolve_provider(), "openai");
+        assert_eq!(config.resolve_model(), "glm-4.6");
+        assert_eq!(
+            config.resolve_base_url().as_deref(),
+            Some("https://api.z.ai/api/paas/v4/chat/completions")
+        );
+        assert_eq!(config.resolve_api_key().as_deref(), Some("sk-test"));
     }
 
     #[test]
