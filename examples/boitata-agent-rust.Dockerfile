@@ -29,8 +29,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/boitata-agent /usr/local/bin/boitata-agent
 
-# A keyless placeholder provider so `boitata-agent` starts without baked secrets.
-# Replace this (or point $BOITATA_CONFIG elsewhere) and pass credentials at run
-# time for a real LLM.
-RUN printf 'provider = "ollama"\nmodel = "llama3"\n' > /etc/boitata.toml
+# Default provider config (a z.ai OpenAI-compatible endpoint). No key is baked in.
+# Every field is overridable at run time by the matching env var the blueprint
+# forwards — BOITATA_PROVIDER / BOITATA_MODEL / BOITATA_BASE_URL / BOITATA_API_KEY
+# — so the image stays provider-agnostic and needs no rebuild to switch endpoint.
+RUN printf 'provider = "openai"\nmodel = "glm-4.6"\nbase_url = "https://api.z.ai/api/paas/v4/chat/completions"\n' > /etc/boitata.toml
 ENV BOITATA_CONFIG=/etc/boitata.toml

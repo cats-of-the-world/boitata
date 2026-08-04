@@ -55,21 +55,31 @@ impl Sandbox for DockerSandbox {
     ) -> anyhow::Result<String> {
         let docker = self.docker().await?;
 
-        // Pull the image (a no-op layer-wise if already present). Draining the
-        // stream to completion is what actually performs the pull; a stall is
-        // bounded by both the cancel token and PULL_TIMEOUT.
-        let options = CreateImageOptionsBuilder::new().from_image(image).build();
-        let pull = async {
-            let mut stream = docker.create_image(Some(options), None, None);
-            while let Some(item) = stream.next().await {
-                item.with_context(|| format!("failed to pull image `{image}`"))?;
-            }
-            Ok::<(), anyhow::Error>(())
-        };
-        tokio::select! {
-            _ = cancel.cancelled() => anyhow::bail!("cancelled while pulling `{image}`"),
-            result = tokio::time::timeout(PULL_TIMEOUT, pull) => {
-                result.with_context(|| format!("timed out pulling image `{image}`"))??;
+        // Use a locally-present image as-is and pull only when it's missing —
+        // Docker's default `--pull missing` behaviour. This lets a locally-built
+        // image (e.g. from `examples/boitata-agent-rust.Dockerfile`) run without
+        // publishing it, and avoids sending its name to a registry: an unqualified
+        // tag like `foo:latest` resolves to `docker.io/library/foo:latest`, so an
+        // unconditional pull would contact Docker Hub even for a purely local
+        // image. (A present image is not refreshed; rebuild or `docker pull` to
+        // update it.)
+        if docker.inspect_image(image).await.is_err() {
+            // Not present locally: pull it. Draining the stream to completion is
+            // what actually performs the pull; a stall is bounded by both the
+            // cancel token and PULL_TIMEOUT.
+            let options = CreateImageOptionsBuilder::new().from_image(image).build();
+            let pull = async {
+                let mut stream = docker.create_image(Some(options), None, None);
+                while let Some(item) = stream.next().await {
+                    item.with_context(|| format!("failed to pull image `{image}`"))?;
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => anyhow::bail!("cancelled while pulling `{image}`"),
+                result = tokio::time::timeout(PULL_TIMEOUT, pull) => {
+                    result.with_context(|| format!("timed out pulling image `{image}`"))??;
+                }
             }
         }
 
