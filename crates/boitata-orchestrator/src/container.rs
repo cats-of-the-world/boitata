@@ -222,11 +222,14 @@ impl AgentSandboxNode {
 
     /// The shell command that starts the agent detached inside the sandbox.
     /// `nohup … &` keeps it running (for the sandbox's life) after the exec
-    /// session returns.
+    /// session returns. The command (from blueprint YAML) is shell-quoted so it's
+    /// a single program word and can't inject into the `sh -c` script; the port is
+    /// a `u16`, so it's already safe to interpolate.
     fn launch_command(&self) -> Vec<String> {
         let script = format!(
             "nohup {} --addr 0.0.0.0:{} >/tmp/boitata-agent.log 2>&1 &",
-            self.command, self.port
+            shell_quote(&self.command),
+            self.port
         );
         vec!["sh".into(), "-c".into(), script]
     }
@@ -331,5 +334,26 @@ mod tests {
         let argv = checkout_command("; rm -rf /", "/w", None);
         assert_eq!(argv[2], "git clone '; rm -rf /' '/w'");
         assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+    }
+
+    #[test]
+    fn launch_command_quotes_the_agent_command() {
+        // The `command` field comes from blueprint YAML; a value with shell
+        // metacharacters must be a single quoted word, not an injection into the
+        // `sh -c` launch script.
+        let node = AgentSandboxNode::new(
+            "agent",
+            "{box}",
+            "{task}",
+            Some(9000),
+            Some("; rm -rf / #".to_string()),
+        );
+        let argv = node.launch_command();
+        assert_eq!(argv[0], "sh");
+        assert_eq!(argv[1], "-c");
+        assert_eq!(
+            argv[2],
+            "nohup '; rm -rf / #' --addr 0.0.0.0:9000 >/tmp/boitata-agent.log 2>&1 &"
+        );
     }
 }
