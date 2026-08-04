@@ -17,15 +17,19 @@
 # published):
 #   docker build -f examples/boitata-agent-rust.Dockerfile -t boitata-agent-rust:latest .
 #
-# The in-container agent needs its LLM credentials. `provision.env` lists the
-# variable *names* to forward; their values are read from the orchestrator's
-# environment at run time — never written in this file, shown in the graph view,
-# or logged. boitata reads its key from `BOITATA_API_KEY` (not the provider's own
-# `ANTHROPIC_API_KEY`), so set that where you run boitata, mapping if needed:
-#   BOITATA_API_KEY="$ANTHROPIC_API_KEY" boitata run … --blueprint …/containerized_task.yaml
-# The agent also needs its config to select the provider (`provider = "anthropic"`,
-# a `model`) — bake that into the image (see the Dockerfile). No key goes in the
-# image; it arrives via the forwarded `BOITATA_API_KEY`.
+# The in-container agent is configured entirely by forwarded env vars.
+# `provision.env` lists the variable *names* to forward; their values are read
+# from the orchestrator's environment at run time — never written in this file,
+# shown in the graph view, or logged. boitata reads:
+#   BOITATA_API_KEY   — the provider key (required)
+#   BOITATA_PROVIDER  — anthropic | openai | ollama (overrides the image default)
+#   BOITATA_MODEL     — the model id
+#   BOITATA_BASE_URL  — the endpoint (e.g. an OpenAI-compatible proxy)
+# Any you don't set fall back to the image's baked config (see the Dockerfile,
+# which defaults to a z.ai OpenAI-compatible endpoint). So point it at z.ai with:
+#   BOITATA_API_KEY=<z.ai key> BOITATA_PROVIDER=openai BOITATA_MODEL=glm-4.6 \
+#     BOITATA_BASE_URL=https://api.z.ai/api/paas/v4/chat/completions \
+#     boitata run … --blueprint …/containerized_task.yaml
 # Requires a running Docker daemon.
 name: containerized_task
 entry: provision
@@ -33,7 +37,7 @@ nodes:
   provision:
     type: provision
     image: "boitata-agent-rust:latest"
-    env: [BOITATA_API_KEY]
+    env: [BOITATA_API_KEY, BOITATA_PROVIDER, BOITATA_MODEL, BOITATA_BASE_URL]
   clone:
     type: checkout
     container: "{provision}"

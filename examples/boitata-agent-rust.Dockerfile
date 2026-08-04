@@ -29,8 +29,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/boitata-agent /usr/local/bin/boitata-agent
 
-# The agent's config selects the provider and model; no key is baked in — it's
-# supplied at run time via the `BOITATA_API_KEY` environment variable (forwarded
-# by the blueprint's `provision.env`). Edit provider/model to taste.
-RUN printf 'provider = "anthropic"\nmodel = "claude-sonnet-5"\n' > /etc/boitata.toml
+# Default provider config (a z.ai OpenAI-compatible endpoint). No key is baked in.
+# Every field is overridable at run time by the matching env var the blueprint
+# forwards — BOITATA_PROVIDER / BOITATA_MODEL / BOITATA_BASE_URL / BOITATA_API_KEY
+# — so the image stays provider-agnostic and needs no rebuild to switch endpoint.
+RUN printf 'provider = "openai"\nmodel = "glm-4.6"\nbase_url = "https://api.z.ai/api/paas/v4/chat/completions"\n' > /etc/boitata.toml
 ENV BOITATA_CONFIG=/etc/boitata.toml
