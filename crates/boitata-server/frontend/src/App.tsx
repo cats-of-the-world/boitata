@@ -251,7 +251,19 @@ function RunView({ id, onChange }: { id: string; onChange: () => void }) {
           <EventLine key={ev.seq} ev={ev} />
         ))}
       </div>
-      {result && <ResultBox result={result} />}
+      {result ? (
+        <ResultBox result={result} />
+      ) : (
+        // No structured result (e.g. a hard error before any step recorded one):
+        // still surface the run's final error so a failure is never silent.
+        status === "failed" &&
+        detail?.status.error && (
+          <div className="result fail">
+            <h3>Failed</h3>
+            <pre className="error">{detail.status.error}</pre>
+          </div>
+        )
+      )}
     </div>
   );
 }
