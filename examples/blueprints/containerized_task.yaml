@@ -1,30 +1,51 @@
-# Run a task inside an ephemeral container: provision a container, git-clone the
-# `repo` declared below into it, and run its tests there — a stand-in for
-# delegating to an in-container agent. The container is destroyed automatically
-# when the run ends (success, failure, or cancel).
+# Run an agent on a repo inside an ephemeral container, then verify with tests.
 #
-# The repo to clone is a field of the `clone` node (edit it below), not the run's
-# {task} — the task string is the agent's prompt, so it needn't be a URL. Use an
-# HTTPS URL: the container has no SSH credentials. The image must ship git and the
-# toolchain the `run` step needs. Requires a running Docker daemon.
+# Flow: provision a container, git-clone the `repo` below into /workspace, run the
+# agent *inside* the container on the run's {task}, then `cargo test`. If the tests
+# fail, the agent is asked to fix them (with the failure output) and they run
+# again — looping until they pass. The container is destroyed when the run ends
+# (success, failure, or cancel).
+#
+# The `repo` is a field of the `clone` node (edit it), not the run's {task} — the
+# task is the agent's prompt. Use an HTTPS URL (the container has no SSH creds).
+#
+# The image must ship git, the toolchain the `test` step needs, AND the
+# `boitata-agent` binary on PATH (that's what the `agent_sandbox` nodes launch and
+# drive over ACP) — so point `image` at a purpose-built image, not a stock one.
+# Requires a running Docker daemon.
 name: containerized_task
 entry: provision
 nodes:
   provision:
     type: provision
-    image: "rust:latest"
+    image: "boitata-agent-rust:latest"
   clone:
     type: checkout
     container: "{provision}"
     repo: "https://github.com/BurntSushi/byteorder.git"
     path: /workspace
+  work:
+    type: agent_sandbox
+    container: "{provision}"
+    prompt: "Work on the repository in /workspace. Task: {task}"
   test:
     type: exec
     container: "{provision}"
     workdir: /workspace
     run: "cargo test"
+  fix:
+    type: agent_sandbox
+    container: "{provision}"
+    prompt: |
+      `cargo test` failed for the repository in /workspace. Fix the code so the
+      tests pass. The failing test output was:
+
+      {test}
 edges:
   - { from: provision, to: clone }
-  - { from: clone, when: success, to: test }
+  - { from: clone, when: success, to: work }
   - { from: clone, when: failure, to: END }
-  - { from: test, to: END }
+  - { from: work, to: test }
+  - { from: test, when: success, to: END }
+  - { from: test, when: failure, to: fix }
+  - { from: fix, to: test }

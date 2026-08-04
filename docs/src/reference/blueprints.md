@@ -123,7 +123,7 @@ starting point and point `--blueprint` at your copy (or run it in place):
 | `fix_test_failure` | `agent → cargo test`, looping until the suite passes |
 | `setup_devbox` | `script (devbox init && install) → agent` |
 | `human_approval` | `human (approval) → agent`, ending on a negative reply |
-| `containerized_task` | `provision → checkout → exec (cargo test)` in an ephemeral container |
+| `containerized_task` | `provision → checkout → agent (in-container) → cargo test`, the agent fixing failures until they pass |
 
 ## Writing your own
 
