@@ -23,7 +23,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::container::{AgentSandboxNode, CheckoutNode, ExecNode, ProvisionNode};
@@ -104,6 +104,231 @@ enum NodeDef {
 /// an object of arguments.
 fn empty_args() -> Value {
     Value::Object(serde_json::Map::new())
+}
+
+/// How a node executes, for visualizing a blueprint: whether its step is
+/// **probabilistic** (an LLM decides what happens) or **deterministic** (a fixed
+/// tool/script/container step), with human-in-the-loop called out on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Execution {
+    /// Driven by the LLM (an `agent` / `agent_sandbox` node) — the outcome varies.
+    Probabilistic,
+    /// A fixed operation (tool, script, or container step) — same inputs, same run.
+    Deterministic,
+    /// Pauses for a human decision (a `human` node).
+    Human,
+}
+
+impl NodeDef {
+    /// The node's schema `type` tag, for display.
+    fn kind_str(&self) -> &'static str {
+        match self {
+            NodeDef::Agent { .. } => "agent",
+            NodeDef::Tool { .. } => "tool",
+            NodeDef::Script { .. } => "script",
+            NodeDef::Human { .. } => "human",
+            NodeDef::Provision { .. } => "provision",
+            NodeDef::Checkout { .. } => "checkout",
+            NodeDef::Exec { .. } => "exec",
+            NodeDef::AgentSandbox { .. } => "agent_sandbox",
+        }
+    }
+
+    /// Whether this node's step is probabilistic (LLM), deterministic, or human.
+    fn execution(&self) -> Execution {
+        match self {
+            NodeDef::Agent { .. } | NodeDef::AgentSandbox { .. } => Execution::Probabilistic,
+            NodeDef::Human { .. } => Execution::Human,
+            NodeDef::Tool { .. }
+            | NodeDef::Script { .. }
+            | NodeDef::Provision { .. }
+            | NodeDef::Checkout { .. }
+            | NodeDef::Exec { .. } => Execution::Deterministic,
+        }
+    }
+
+    /// A one-line summary of what the node does, for the graph tooltip (the tool
+    /// name, the command, the image/repo, …). `None` for agent nodes, whose work
+    /// is the free-form prompt.
+    fn detail(&self) -> Option<String> {
+        match self {
+            NodeDef::Agent { .. } | NodeDef::AgentSandbox { .. } => None,
+            NodeDef::Tool { tool, .. } => Some(tool.clone()),
+            NodeDef::Script { run } => Some(run.clone()),
+            NodeDef::Human { prompt, .. } => Some(prompt.clone()),
+            NodeDef::Provision { image } => Some(image.clone()),
+            NodeDef::Checkout { repo, .. } => Some(repo.clone()),
+            NodeDef::Exec { run, .. } => Some(run.clone()),
+        }
+    }
+
+    /// The node's full configuration as ordered key/value fields, for showing the
+    /// exact parameters of each step (prompt, command, image, repo, port, …).
+    /// Optional fields are included only when set.
+    fn config(&self) -> Vec<ConfigField> {
+        let f = |key: &str, value: String| ConfigField {
+            key: key.to_string(),
+            value,
+        };
+        match self {
+            NodeDef::Agent { prompt, tools } => {
+                let mut c = vec![f("prompt", prompt.clone())];
+                if let Some(tools) = tools {
+                    c.push(f("tools", tools.join(", ")));
+                }
+                c
+            }
+            NodeDef::Tool { tool, args } => {
+                let mut c = vec![f("tool", tool.clone())];
+                let empty = args.as_object().is_some_and(|o| o.is_empty());
+                if !args.is_null() && !empty {
+                    c.push(f(
+                        "args",
+                        serde_json::to_string_pretty(args).unwrap_or_default(),
+                    ));
+                }
+                c
+            }
+            NodeDef::Script { run } => vec![f("run", run.clone())],
+            NodeDef::Human { prompt, mode } => vec![
+                f("prompt", prompt.clone()),
+                f("mode", format!("{mode:?}").to_lowercase()),
+            ],
+            NodeDef::Provision { image } => vec![f("image", image.clone())],
+            NodeDef::Checkout {
+                container,
+                repo,
+                git_ref,
+                path,
+            } => {
+                let mut c = vec![f("container", container.clone()), f("repo", repo.clone())];
+                if let Some(r) = git_ref {
+                    c.push(f("ref", r.clone()));
+                }
+                if let Some(p) = path {
+                    c.push(f("path", p.clone()));
+                }
+                c
+            }
+            NodeDef::Exec {
+                container,
+                run,
+                workdir,
+            } => {
+                let mut c = vec![f("container", container.clone()), f("run", run.clone())];
+                if let Some(w) = workdir {
+                    c.push(f("workdir", w.clone()));
+                }
+                c
+            }
+            NodeDef::AgentSandbox {
+                container,
+                prompt,
+                port,
+                command,
+            } => {
+                let mut c = vec![
+                    f("container", container.clone()),
+                    f("prompt", prompt.clone()),
+                ];
+                if let Some(p) = port {
+                    c.push(f("port", p.to_string()));
+                }
+                if let Some(cmd) = command {
+                    c.push(f("command", cmd.clone()));
+                }
+                c
+            }
+        }
+    }
+}
+
+/// A blueprint's shape for display: its nodes (each tagged deterministic vs
+/// probabilistic) and edges (with any `success`/`failure` condition). Derived
+/// straight from the YAML so conditional branches are visible — unlike the
+/// compiled [`Graph`], whose routers are opaque closures.
+#[derive(Debug, Serialize)]
+pub struct BlueprintGraph {
+    pub name: String,
+    pub entry: String,
+    pub nodes: Vec<BlueprintNodeInfo>,
+    pub edges: Vec<BlueprintEdgeInfo>,
+}
+
+/// One node in a [`BlueprintGraph`].
+#[derive(Debug, Serialize)]
+pub struct BlueprintNodeInfo {
+    pub id: String,
+    /// The schema `type` (`agent`, `tool`, `script`, …).
+    pub kind: String,
+    pub execution: Execution,
+    /// A short summary of the node's work (tool name, command, image, …).
+    pub detail: Option<String>,
+    /// The node's full configuration as ordered key/value fields.
+    pub config: Vec<ConfigField>,
+}
+
+/// One `key: value` field of a node's configuration (e.g. `prompt`, `run`,
+/// `image`), for showing the exact parameters of each step.
+#[derive(Debug, Serialize)]
+pub struct ConfigField {
+    pub key: String,
+    pub value: String,
+}
+
+/// One edge in a [`BlueprintGraph`]. `to` is a node id or the string `"END"`;
+/// `when` is `"success"`/`"failure"` for a conditional edge, else `None`.
+#[derive(Debug, Serialize)]
+pub struct BlueprintEdgeInfo {
+    pub from: String,
+    pub to: String,
+    pub when: Option<String>,
+}
+
+/// Describe a blueprint's shape from its YAML source, for visualization. Parses
+/// (and so validates the schema of) the document, but does not compile it — see
+/// [`from_yaml`] for that. Nodes are ordered entry-first, then by name, so the
+/// output is stable.
+pub fn describe(src: &str) -> anyhow::Result<BlueprintGraph> {
+    let def: BlueprintDef =
+        serde_norway::from_str(src).context("failed to parse blueprint YAML")?;
+    let mut nodes: Vec<BlueprintNodeInfo> = def
+        .nodes
+        .iter()
+        .map(|(id, node)| BlueprintNodeInfo {
+            id: id.clone(),
+            kind: node.kind_str().to_string(),
+            execution: node.execution(),
+            detail: node.detail(),
+            config: node.config(),
+        })
+        .collect();
+    // Entry first (it's where a run begins), then alphabetical — a stable order
+    // that reads top-down, independent of the YAML map's iteration order.
+    nodes.sort_by(|a, b| {
+        let rank = |id: &str| usize::from(id != def.entry);
+        rank(&a.id).cmp(&rank(&b.id)).then_with(|| a.id.cmp(&b.id))
+    });
+    let edges = def
+        .edges
+        .iter()
+        .map(|e| BlueprintEdgeInfo {
+            from: e.from.clone(),
+            to: if e.to.eq_ignore_ascii_case("END") {
+                "END".to_string()
+            } else {
+                e.to.clone()
+            },
+            when: e.when.clone(),
+        })
+        .collect();
+    Ok(BlueprintGraph {
+        name: def.name,
+        entry: def.entry,
+        nodes,
+        edges,
+    })
 }
 
 /// One edge. Either unconditional (`to` only) or conditional (`when` + `to`).
@@ -298,6 +523,51 @@ edges:
   - {from: verify, when: failure, to: fix}
   - {from: verify, when: success, to: END}
 "#;
+
+    #[test]
+    fn describe_classifies_nodes_and_keeps_edges() {
+        let g = describe(SAMPLE).expect("valid blueprint");
+        assert_eq!(g.entry, "fix");
+        // Entry first, then alphabetical.
+        assert_eq!(
+            g.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            ["fix", "fmt", "verify"]
+        );
+        // The agent node is probabilistic; the tool/script nodes deterministic.
+        let by = |id: &str| g.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(by("fix").execution, Execution::Probabilistic);
+        assert_eq!(by("fmt").execution, Execution::Deterministic);
+        assert_eq!(by("fmt").detail.as_deref(), Some("cargo_fmt"));
+        assert_eq!(by("verify").kind, "script");
+        // Each node carries its full configuration as ordered fields.
+        let cfg = |id: &str, key: &str| {
+            by(id)
+                .config
+                .iter()
+                .find(|c| c.key == key)
+                .map(|c| c.value.as_str())
+        };
+        assert_eq!(cfg("verify", "run"), Some("cargo check"));
+        assert_eq!(cfg("fix", "prompt"), Some("Fix it: {task}"));
+        assert_eq!(cfg("fix", "tools"), Some("file_read, file_edit"));
+        // Conditional edges keep their `when`, and END is rendered as "END".
+        let end = g
+            .edges
+            .iter()
+            .find(|e| e.from == "verify" && e.to == "END")
+            .unwrap();
+        assert_eq!(end.when.as_deref(), Some("success"));
+        assert!(
+            g.edges.iter().any(|e| e.from == "verify"
+                && e.to == "fix"
+                && e.when.as_deref() == Some("failure"))
+        );
+    }
+
+    #[test]
+    fn describe_rejects_invalid_yaml() {
+        assert!(describe("not: [a blueprint").is_err());
+    }
 
     #[test]
     fn parses_and_compiles_a_full_blueprint() {

@@ -134,3 +134,143 @@ button.cancel { margin: 0 0 0 auto; padding: 5px 12px; font-size: 13px; }
 }
 .error { color: var(--err); font-size: 13px; }
 .transcript strong { color: var(--accent); }
+
+/* ---- Blueprint graph ---- */
+:root {
+  --prob: #b794f6;   /* probabilistic / LLM */
+  --det: #5aa2f0;    /* deterministic */
+  --human: #e0a458;  /* human-in-the-loop */
+}
+
+.bp { display: flex; flex-direction: column; gap: 12px; }
+.bp-title { display: flex; align-items: baseline; gap: 10px; }
+.bp-title strong { font-size: 15px; }
+
+.bp-legend { display: flex; flex-wrap: wrap; gap: 8px; }
+.bp-chip {
+  font-size: 11.5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+}
+.bp-chip.exec-probabilistic { border-color: var(--prob); color: var(--prob); }
+.bp-chip.exec-deterministic { border-color: var(--det); color: var(--det); }
+.bp-chip.exec-human { border-color: var(--human); color: var(--human); }
+
+.bp-canvas {
+  position: relative;
+  background:
+    radial-gradient(circle, var(--border) 1px, transparent 1px) 0 0 / 22px 22px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0;
+}
+.bp-edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+
+.edge { fill: none; stroke: var(--muted); stroke-width: 1.75; opacity: 0.8; }
+.edge.ok { stroke: var(--ok); }
+.edge.err { stroke: var(--err); }
+.arrow { stroke: none; }
+.arrow.plain { fill: var(--muted); }
+.arrow.ok { fill: var(--ok); }
+.arrow.err { fill: var(--err); }
+.edge-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+}
+.edge-label.ok { fill: var(--ok); }
+.edge-label.err { fill: var(--err); }
+
+.bp-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  cursor: pointer;
+}
+.bp-node:hover { border-color: var(--muted); }
+.bp-node.selected { outline: 2px solid var(--accent); outline-offset: 1px; }
+.bp-node.exec-probabilistic { border-left-color: var(--prob); }
+.bp-node.exec-deterministic { border-left-color: var(--det); }
+.bp-node.exec-human { border-left-color: var(--human); }
+
+.bp-node-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.bp-node-badge { font-size: 12px; flex: none; }
+.bp-node-id {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bp-node-kind {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bp-node.bp-end {
+  align-items: center;
+  justify-content: center;
+  border-left-color: var(--border);
+  border-style: dashed;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  cursor: default;
+}
+
+/* Configuration panel for the selected step. */
+.bp-config {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 12px 14px;
+}
+.bp-config.muted { color: var(--muted); font-size: 13px; }
+.bp-config-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.bp-config-head strong { font-size: 14px; }
+.bp-config-kind {
+  color: var(--muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+.bp-config-fields { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.bp-config-field { display: grid; grid-template-columns: 96px 1fr; gap: 10px; align-items: start; }
+.bp-config-field dt {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding-top: 6px;
+}
+.bp-config-field dd { margin: 0; min-width: 0; }
+.bp-config-field pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+}

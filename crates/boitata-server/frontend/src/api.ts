@@ -37,6 +37,35 @@ export interface RunResult {
   transcript: TranscriptEntry[];
 }
 
+// How a blueprint node executes (mirrors orchestrator's `Execution`).
+export type Execution = "probabilistic" | "deterministic" | "human";
+
+export interface ConfigField {
+  key: string;
+  value: string;
+}
+
+export interface BlueprintNode {
+  id: string;
+  kind: string;
+  execution: Execution;
+  detail: string | null;
+  config: ConfigField[];
+}
+
+export interface BlueprintEdge {
+  from: string;
+  to: string; // node id or "END"
+  when: string | null; // "success" | "failure" | null
+}
+
+export interface BlueprintGraph {
+  name: string;
+  entry: string;
+  nodes: BlueprintNode[];
+  edges: BlueprintEdge[];
+}
+
 // One live event: `seq` plus the flattened audit event, whose kind is in `event`.
 export interface RunEvent {
   seq: number;
@@ -70,6 +99,8 @@ const run = (id: string) => `/api/runs/${encodeURIComponent(id)}`;
 
 export const api = {
   listBlueprints: () => getJson<string[]>("/api/blueprints"),
+  getBlueprint: (name: string) =>
+    getJson<BlueprintGraph>(`/api/blueprints/${encodeURIComponent(name)}`),
   listRuns: () => getJson<RunSummary[]>("/api/runs"),
   getRun: (id: string) => getJson<RunDetail>(run(id)),
   startRun: async (task: string, blueprint: string | null) => {

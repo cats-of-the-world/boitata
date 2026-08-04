@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  type BlueprintGraph,
+  type BlueprintNode,
+  type Execution,
   type RunDetail,
   type RunEvent,
   type RunResult,
@@ -11,6 +14,8 @@ export function App() {
   const [blueprints, setBlueprints] = useState<string[]>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
+  // The blueprint chosen in the form, previewed as a graph until a run starts.
+  const [preview, setPreview] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -56,15 +61,32 @@ export function App() {
       </header>
       <div className="layout">
         <aside>
-          <NewRunForm blueprints={blueprints} onStart={start} />
+          <NewRunForm
+            blueprints={blueprints}
+            onStart={start}
+            onPreview={(bp) => {
+              setPreview(bp);
+              if (bp) setSelected(null); // show the graph, not a prior run
+            }}
+          />
           {error && <div className="error">{error}</div>}
-          <RunList runs={runs} selected={selected} onSelect={setSelected} />
+          <RunList
+            runs={runs}
+            selected={selected}
+            onSelect={(id) => {
+              setSelected(id);
+            }}
+          />
         </aside>
         <main>
           {selected ? (
             <RunView key={selected} id={selected} onChange={refreshRuns} />
+          ) : preview ? (
+            <BlueprintGraphView name={preview} />
           ) : (
-            <div className="empty">Select or start a run.</div>
+            <div className="empty">
+              Select or start a run, or pick a blueprint to preview its graph.
+            </div>
           )}
         </main>
       </div>
@@ -75,9 +97,11 @@ export function App() {
 function NewRunForm({
   blueprints,
   onStart,
+  onPreview,
 }: {
   blueprints: string[];
   onStart: (task: string, blueprint: string | null) => void;
+  onPreview: (blueprint: string) => void;
 }) {
   const [task, setTask] = useState("");
   const [blueprint, setBlueprint] = useState("");
@@ -99,7 +123,13 @@ function NewRunForm({
         rows={4}
       />
       <label>Mode</label>
-      <select value={blueprint} onChange={(e) => setBlueprint(e.target.value)}>
+      <select
+        value={blueprint}
+        onChange={(e) => {
+          setBlueprint(e.target.value);
+          onPreview(e.target.value);
+        }}
+      >
         <option value="">Single agent</option>
         {blueprints.map((b) => (
           <option key={b} value={b}>
@@ -282,6 +312,267 @@ function ResultBox({ result }: { result: RunResult }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// How each execution class is labelled in the graph and legend.
+const EXEC: Record<Execution, { icon: string; label: string }> = {
+  probabilistic: { icon: "🎲", label: "probabilistic (LLM)" },
+  deterministic: { icon: "⚙️", label: "deterministic" },
+  human: { icon: "🧑", label: "human-in-the-loop" },
+};
+
+// Fetch a blueprint's graph and render it: the layered graph, a legend explaining
+// the marking, and the configuration of the selected step.
+function BlueprintGraphView({ name }: { name: string }) {
+  const [graph, setGraph] = useState<BlueprintGraph | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+
+  useEffect(() => {
+    setGraph(null);
+    setErr(null);
+    setSelected(null);
+    api
+      .getBlueprint(name)
+      .then((g) => {
+        setGraph(g);
+        setSelected(g.entry); // show the entry step's config by default
+      })
+      .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+  }, [name]);
+
+  if (err) return <div className="error">Failed to load blueprint: {err}</div>;
+  if (!graph) return <div className="empty">Loading blueprint…</div>;
+
+  const selectedNode = graph.nodes.find((n) => n.id === selected) ?? null;
+
+  return (
+    <div className="bp">
+      <div className="bp-title">
+        <strong>{graph.name}</strong>
+        <span className="muted">entry: {graph.entry}</span>
+      </div>
+      <div className="bp-legend">
+        {(Object.keys(EXEC) as Execution[]).map((k) => (
+          <span key={k} className={`bp-chip exec-${k}`}>
+            {EXEC[k].icon} {EXEC[k].label}
+          </span>
+        ))}
+      </div>
+      <BlueprintGraphSvg
+        graph={graph}
+        selected={selected}
+        onSelect={setSelected}
+      />
+      <NodeConfig node={selectedNode} />
+    </div>
+  );
+}
+
+// The configuration of one step: its execution class, kind, and every parameter
+// (prompt, command, image, …) exactly as written in the blueprint.
+function NodeConfig({ node }: { node: BlueprintNode | null }) {
+  if (!node) {
+    return <div className="bp-config muted">Click a step to see its configuration.</div>;
+  }
+  return (
+    <div className="bp-config">
+      <div className="bp-config-head">
+        <span className={`bp-chip exec-${node.execution}`}>
+          {EXEC[node.execution].icon} {EXEC[node.execution].label}
+        </span>
+        <strong>{node.id}</strong>
+        <code className="bp-config-kind">{node.kind}</code>
+      </div>
+      {node.config.length === 0 ? (
+        <div className="muted">No configuration.</div>
+      ) : (
+        <dl className="bp-config-fields">
+          {node.config.map((c) => (
+            <div key={c.key} className="bp-config-field">
+              <dt>{c.key}</dt>
+              <dd>
+                <pre>{c.value}</pre>
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
+  );
+}
+
+// Node/layout geometry (px).
+const NODE_W = 172;
+const NODE_H = 60;
+const COL_GAP = 40;
+const ROW = NODE_H + 52; // top-to-top distance between layers
+const PAD = 24;
+
+// A layered top-down drawing of the blueprint: HTML node cards positioned over an
+// SVG edge layer. Layers come from a breadth-first walk from the entry node, so a
+// run reads top-to-bottom; edges that go back up (verify loops) curve on the
+// right. Deterministic vs probabilistic is shown by colour + badge on each card.
+function BlueprintGraphSvg({
+  graph,
+  selected,
+  onSelect,
+}: {
+  graph: BlueprintGraph;
+  selected: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const { positions, width, height, hasEnd } = useMemo(() => {
+    const hasEnd = graph.edges.some((e) => e.to === "END");
+    const ids = graph.nodes.map((n) => n.id);
+    const allIds = hasEnd ? [...ids, "END"] : ids;
+
+    // BFS layering from the entry; unreached nodes land on layer 0.
+    const layerOf = new Map<string, number>([[graph.entry, 0]]);
+    const queue = [graph.entry];
+    while (queue.length) {
+      const u = queue.shift() as string;
+      const lu = layerOf.get(u) ?? 0;
+      for (const e of graph.edges) {
+        if (e.from === u && !layerOf.has(e.to)) {
+          layerOf.set(e.to, lu + 1);
+          queue.push(e.to);
+        }
+      }
+    }
+    for (const id of allIds) if (!layerOf.has(id)) layerOf.set(id, 0);
+
+    const layers: string[][] = [];
+    for (const id of allIds) {
+      const l = layerOf.get(id) as number;
+      (layers[l] ||= []).push(id);
+    }
+    for (let i = 0; i < layers.length; i++) layers[i] ||= [];
+
+    const maxCols = Math.max(1, ...layers.map((r) => r.length));
+    const width = PAD * 2 + maxCols * NODE_W + (maxCols - 1) * COL_GAP;
+    const height = PAD * 2 + (layers.length - 1) * ROW + NODE_H;
+
+    const positions = new Map<string, { x: number; y: number; layer: number }>();
+    layers.forEach((row, l) => {
+      const rowWidth = row.length * NODE_W + (row.length - 1) * COL_GAP;
+      const startX = (width - rowWidth) / 2;
+      row.forEach((id, i) => {
+        positions.set(id, {
+          x: startX + i * (NODE_W + COL_GAP),
+          y: PAD + l * ROW,
+          layer: l,
+        });
+      });
+    });
+    return { positions, width, height, hasEnd };
+  }, [graph]);
+
+  // Build an SVG path for one edge: straight-ish down for a forward edge, a curve
+  // bulging right for a back/lateral edge (a loop). Returns the path and a point
+  // to anchor the success/failure label.
+  const edgeGeom = (from: string, to: string) => {
+    const a = positions.get(from);
+    const b = positions.get(to);
+    if (!a || !b) return null;
+    const ax = a.x + NODE_W / 2;
+    const bx = b.x + NODE_W / 2;
+    if (b.layer > a.layer) {
+      const ay = a.y + NODE_H;
+      const by = b.y;
+      const my = (ay + by) / 2;
+      return {
+        d: `M ${ax} ${ay} C ${ax} ${my}, ${bx} ${my}, ${bx} ${by}`,
+        label: { x: (ax + bx) / 2, y: my },
+      };
+    }
+    // Back or lateral edge: leave the right side and re-enter the target's right.
+    const ay = a.y + NODE_H / 2;
+    const by = b.y + NODE_H / 2;
+    const ar = a.x + NODE_W;
+    const br = b.x + NODE_W;
+    const bulge = Math.max(ar, br) + 46;
+    return {
+      d: `M ${ar} ${ay} C ${bulge} ${ay}, ${bulge} ${by}, ${br} ${by}`,
+      label: { x: bulge - 6, y: (ay + by) / 2 },
+    };
+  };
+
+  const whenClass = (when: string | null) =>
+    when === "success" ? "ok" : when === "failure" ? "err" : "plain";
+
+  return (
+    <div className="bp-canvas" style={{ width, height }}>
+      <svg className="bp-edges" width={width} height={height}>
+        <defs>
+          {["plain", "ok", "err"].map((c) => (
+            <marker
+              key={c}
+              id={`arrow-${c}`}
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth="7"
+              markerHeight="7"
+              orient="auto-start-reverse"
+            >
+              <path d="M 0 0 L 10 5 L 0 10 z" className={`arrow ${c}`} />
+            </marker>
+          ))}
+        </defs>
+        {graph.edges.map((e, i) => {
+          const g = edgeGeom(e.from, e.to);
+          if (!g) return null;
+          const cls = whenClass(e.when);
+          return (
+            <g key={i}>
+              <path d={g.d} className={`edge ${cls}`} markerEnd={`url(#arrow-${cls})`} />
+              {e.when && (
+                <text x={g.label.x} y={g.label.y} className={`edge-label ${cls}`}>
+                  {e.when === "success" ? "✓" : "✗"}
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+      {graph.nodes.map((n) => {
+        const p = positions.get(n.id);
+        if (!p) return null;
+        return (
+          <div
+            key={n.id}
+            className={`bp-node exec-${n.execution}${n.id === selected ? " selected" : ""}`}
+            style={{ left: p.x, top: p.y, width: NODE_W, height: NODE_H }}
+            title={n.detail ? `${n.kind}: ${n.detail}` : n.kind}
+            onClick={() => onSelect(n.id)}
+          >
+            <div className="bp-node-head">
+              <span className="bp-node-badge">{EXEC[n.execution].icon}</span>
+              <span className="bp-node-id">{n.id}</span>
+            </div>
+            <div className="bp-node-kind">
+              {n.kind}
+              {n.detail ? ` · ${truncate(n.detail, 20)}` : ""}
+            </div>
+          </div>
+        );
+      })}
+      {hasEnd &&
+        (() => {
+          const p = positions.get("END");
+          if (!p) return null;
+          return (
+            <div
+              className="bp-node bp-end"
+              style={{ left: p.x, top: p.y, width: NODE_W, height: NODE_H }}
+            >
+              END
+            </div>
+          );
+        })()}
     </div>
   );
 }

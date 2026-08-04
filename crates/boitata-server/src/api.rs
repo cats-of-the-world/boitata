@@ -33,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs/{id}/events", get(run_events))
         .route("/api/runs/{id}/cancel", post(cancel_run))
         .route("/api/blueprints", get(list_blueprints))
+        .route("/api/blueprints/{name}", get(get_blueprint))
         .with_state(state)
         .fallback(crate::assets::static_handler)
 }
@@ -280,6 +281,25 @@ async fn list_blueprints(State(app): State<AppState>) -> Json<Vec<String>> {
     Json(app.blueprints.keys().cloned().collect())
 }
 
+/// `GET /api/blueprints/{name}` — the blueprint's graph for display: its nodes
+/// (each tagged deterministic vs probabilistic) and edges (with any
+/// success/failure condition), so the web UI can draw it. Only configured names
+/// resolve; the file is re-read so an edit is reflected without a restart.
+async fn get_blueprint(
+    State(app): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<boitata_orchestrator::BlueprintGraph>, ApiError> {
+    let path = app
+        .blueprints
+        .get(&name)
+        .ok_or_else(|| ApiError::not_found_msg(format!("unknown blueprint `{name}`")))?;
+    let src = std::fs::read_to_string(path)
+        .map_err(|e| ApiError::internal(format!("failed to read blueprint `{name}`: {e}")))?;
+    let graph = boitata_orchestrator::describe(&src)
+        .map_err(|e| ApiError::internal(format!("blueprint `{name}` is invalid: {e:#}")))?;
+    Ok(Json(graph))
+}
+
 /// `GET /api/runs/{id}/events` — Server-Sent Events. Replays the history buffer,
 /// then streams live events until the run finishes. Events carry `seq` so the
 /// replay/live handoff can dedupe.
@@ -362,6 +382,18 @@ impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+    fn not_found_msg(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
             message: message.into(),
         }
     }
@@ -526,5 +558,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_blueprint_returns_its_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("verify.yaml"),
+            "name: verify\nentry: work\nnodes:\n  work: {type: agent, prompt: \"go {task}\"}\n  \
+             check: {type: script, run: \"cargo test\"}\nedges:\n  - {from: work, to: check}\n  \
+             - {from: check, when: failure, to: work}\n  - {from: check, when: success, to: END}\n",
+        )
+        .unwrap();
+        let catalog = boitata_orchestrator::discover(dir.path()).unwrap();
+        let app = router(state_with_blueprints(catalog).await);
+
+        // A known blueprint returns its graph with node classifications.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/api/blueprints/verify")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = body_json(resp).await;
+        assert_eq!(g["entry"], "work");
+        let work = g["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "work")
+            .unwrap();
+        assert_eq!(work["execution"], "probabilistic");
+
+        // An unknown blueprint is a 404.
+        let resp = app
+            .oneshot(
+                Request::get("/api/blueprints/nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
