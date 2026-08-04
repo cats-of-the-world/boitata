@@ -48,6 +48,9 @@ pub use human::{HumanInterface, StdioHuman};
 pub use library::{discover, load};
 pub use sandbox::Sandbox;
 pub use state::{State, Status};
+pub use yaml::{
+    BlueprintEdgeInfo, BlueprintGraph, BlueprintNodeInfo, ConfigField, Execution, describe,
+};
 
 use nodes::{Node, NodeCtx};
 use sandbox::Sandboxes;
