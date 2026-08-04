@@ -83,7 +83,7 @@ impl ProvisionNode {
     /// process environment. A requested variable that isn't set is skipped with a
     /// warning that names it only — the value is never touched or logged.
     fn resolve_env(&self) -> Vec<(String, String)> {
-        let mut resolved = Vec::new();
+        let mut resolved = Vec::with_capacity(self.env.len());
         for name in &self.env {
             match std::env::var(name) {
                 Ok(value) => resolved.push((name.clone(), value)),
