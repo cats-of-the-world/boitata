@@ -11,6 +11,7 @@
 
 - [Determinism First](./concepts/philosophy.md)
 - [Architecture](./concepts/architecture.md)
+- [Sandboxed Execution](./concepts/sandboxed-execution.md)
 
 # Reference
 

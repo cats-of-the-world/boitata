@@ -8,8 +8,9 @@ dependencies point inward toward `boitata-core`.
 ```
 crates/
   boitata-core/          # Config, providers, tools, runtime, audit
-  boitata-agent/         # The agent loop (LLM + tools)
-  boitata-orchestrator/  # Blueprint graphs over the agent
+  boitata-agent/         # The agent loop (LLM + tools) + the ACP agent server
+  boitata-acp/           # Agent Client Protocol: serve an agent / drive one
+  boitata-orchestrator/  # Blueprint graphs over the agent (+ sandbox nodes)
   boitata-cli/           # The `boitata` binary
   boitata-server/        # HTTP/SSE server + embedded web UI
 ```
@@ -64,11 +65,27 @@ The core execution engine. It accepts a task description, then iterates through
 LLM calls and tool executions while maintaining a token-budgeted conversation
 context, and returns a structured result.
 
+### `boitata-agent`
+
+Also ships the `boitata-agent` binary: the agent exposed as an **ACP server** over
+TCP, for running the agent inside a sandbox. See
+[Sandboxed Execution](./sandboxed-execution.md).
+
+### `boitata-acp`
+
+The [Agent Client Protocol](https://agentclientprotocol.com/) integration: a
+`serve()` that runs an agent as an ACP server and a `run_prompt()` client the
+orchestrator uses to drive an agent running elsewhere. Boitata's audit events ride
+inside the protocol's message chunks, so the existing audit/SSE stream is unchanged.
+
 ### `boitata-orchestrator`
 
 The blueprint system. Compiles a YAML blueprint into a typed graph of `agent`,
-`tool`, `script`, and `human` nodes, then executes it with parallel super-steps,
-in-memory checkpointing, and retry. See [Blueprints](../reference/blueprints.md).
+`tool`, `script`, `human`, and **sandbox** (`provision` / `checkout` / `exec` /
+`agent_sandbox`) nodes, then executes it with parallel super-steps, in-memory
+checkpointing, and retry. It talks to sandboxes through a `Sandbox` backend trait
+(Docker today, Firecracker planned). See [Blueprints](../reference/blueprints.md)
+and [Sandboxed Execution](./sandboxed-execution.md).
 
 ### `boitata-cli`
 
