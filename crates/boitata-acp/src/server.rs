@@ -90,13 +90,26 @@ async fn run_prompt_turn(
 
     // Run the agent concurrently with draining its events. When the run finishes
     // it drops the sink, closing the channel and ending the drain loop.
-    let run = tokio::spawn(async move { runner.run(prompt, sink, cancel).await });
+    let run = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { runner.run(prompt, sink, cancel).await }
+    });
 
     while let Some(event) = rx.recv().await {
         let update = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(
             mapping::encode(&event),
         )));
-        let _ = cx.send_notification(SessionNotification::new(session_id.clone(), update));
+        // A send failure means the client disconnected. Cancel the run so the
+        // agent stops promptly (instead of running to completion streaming into
+        // the void) and stop draining — nothing is listening anymore.
+        if cx
+            .send_notification(SessionNotification::new(session_id.clone(), update))
+            .is_err()
+        {
+            tracing::info!("ACP client disconnected mid-prompt; cancelling the run");
+            cancel.cancel();
+            break;
+        }
     }
 
     let stop_reason = match run.await {

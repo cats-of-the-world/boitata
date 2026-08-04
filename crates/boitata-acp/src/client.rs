@@ -22,7 +22,28 @@ pub async fn run_prompt(
     addr: &str,
     prompt: String,
     sink: Arc<dyn AuditSink>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
+) -> anyhow::Result<AgentOutcome> {
+    // Drive the whole turn under the cancellation token. Every step below is a
+    // network `.await` with no built-in timeout, so an unresponsive or wedged
+    // agent would otherwise hang the caller forever. On cancellation we stop
+    // awaiting and return, dropping the session future — which closes the TCP
+    // stream — rather than leaking the connection.
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            anyhow::bail!("cancelled while driving the agent at {addr}")
+        }
+        result = drive_prompt(addr, prompt, sink) => result,
+    }
+}
+
+/// One prompt turn against the agent at `addr`: connect, initialize, open a
+/// session, and run `prompt` to completion, forwarding streamed events to `sink`.
+async fn drive_prompt(
+    addr: &str,
+    prompt: String,
+    sink: Arc<dyn AuditSink>,
 ) -> anyhow::Result<AgentOutcome> {
     let stream = TcpStream::connect(addr)
         .await
