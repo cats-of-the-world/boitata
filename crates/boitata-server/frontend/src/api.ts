@@ -66,6 +66,12 @@ export interface BlueprintGraph {
   edges: BlueprintEdge[];
 }
 
+// The raw definition (YAML source) of a blueprint, exactly as written on disk.
+export interface BlueprintSource {
+  name: string;
+  source: string;
+}
+
 // One live event: `seq` plus the flattened audit event, whose kind is in `event`.
 export interface RunEvent {
   seq: number;
@@ -101,6 +107,8 @@ export const api = {
   listBlueprints: () => getJson<string[]>("/api/blueprints"),
   getBlueprint: (name: string) =>
     getJson<BlueprintGraph>(`/api/blueprints/${encodeURIComponent(name)}`),
+  getBlueprintSource: (name: string) =>
+    getJson<BlueprintSource>(`/api/blueprints/${encodeURIComponent(name)}/source`),
   listRuns: () => getJson<RunSummary[]>("/api/runs"),
   getRun: (id: string) => getJson<RunDetail>(run(id)),
   startRun: async (task: string, blueprint: string | null) => {

@@ -56,7 +56,10 @@ export function App() {
   return (
     <div className="app">
       <header>
-        <h1>🔥 boitata</h1>
+        <span className="mark" aria-hidden="true">
+          🔥
+        </span>
+        <h1>boitatá</h1>
         <span className="tagline">agent &amp; orchestrator console</span>
       </header>
       <div className="layout">
@@ -249,12 +252,15 @@ function RunView({ id, onChange }: { id: string; onChange: () => void }) {
 
   const status = detail?.status.state ?? "running";
   const result = detail?.result ?? null;
+  const groups = useMemo(() => groupEvents(events), [events]);
+  // The freshest step is the one worth keeping open; older ones fold away.
+  const lastKey = groups.length ? groups[groups.length - 1].key : null;
 
   return (
     <div className="run-view">
       <div className="run-header">
         <span className={`dot ${status}`} />
-        <strong>{status}</strong>
+        <strong className="run-status">{status}</strong>
         {status === "running" && (
           <button
             className="cancel"
@@ -269,11 +275,21 @@ function RunView({ id, onChange }: { id: string; onChange: () => void }) {
           </button>
         )}
       </div>
+      {status === "running" && <RunningBanner />}
       {actionError && <div className="error">{actionError}</div>}
       <div className="log" ref={logRef}>
-        {events.map((ev) => (
-          <EventLine key={ev.seq} ev={ev} />
+        {groups.map((g) => (
+          <StepGroup
+            key={g.key}
+            group={g}
+            // Keep the active/most-recent step open; collapse finished ones so a
+            // long run stays scannable.
+            defaultOpen={g.key === lastKey || g.status === "running"}
+          />
         ))}
+        {groups.length === 0 && (
+          <div className="muted">Waiting for the first event…</div>
+        )}
       </div>
       {result ? (
         <ResultBox result={result} />
@@ -298,6 +314,127 @@ function EventLine({ ev }: { ev: RunEvent }) {
     <div className={`event ${cls}`}>
       <span className="icon">{icon}</span>
       <span className="text">{text}</span>
+    </div>
+  );
+}
+
+// Live feedback while a run is in flight: the boitatá (a fiery serpent of
+// Brazilian folklore) coils along, making it obvious the agent is still working
+// rather than stalled.
+function RunningBanner() {
+  return (
+    <div className="running-banner" role="status" aria-live="polite">
+      <span className="serpent" aria-hidden="true">
+        🐍
+      </span>
+      <span className="running-text">Boitatá is working…</span>
+      <span className="embers" aria-hidden="true">
+        <i /> <i /> <i />
+      </span>
+    </div>
+  );
+}
+
+// A run's event stream, folded into the logical steps it moved through. Each
+// group is collapsible so a finished step can be tucked away while the active
+// one stays visible.
+interface StepGroupData {
+  key: string;
+  title: string;
+  status: "info" | "ok" | "err" | "running";
+  events: RunEvent[];
+}
+
+// Split the flat audit stream into steps. A blueprint run breaks on each executed
+// node (and on retries); a single-agent run is one step that closes when the run
+// completes. A trailing, unclosed buffer is the step currently in progress.
+function groupEvents(events: RunEvent[]): StepGroupData[] {
+  const isBlueprint = events.some((e) => e.event === "blueprint_started");
+  const boundary = new Set(
+    isBlueprint
+      ? ["blueprint_started", "node_executed", "super_step_retried", "blueprint_completed"]
+      : ["run_completed"],
+  );
+
+  const groups: StepGroupData[] = [];
+  let buf: RunEvent[] = [];
+  let n = 0;
+  const flush = (running: boolean) => {
+    if (buf.length === 0) return;
+    groups.push(makeGroup(buf, n++, running));
+    buf = [];
+  };
+  for (const ev of events) {
+    buf.push(ev);
+    if (boundary.has(ev.event)) flush(false);
+  }
+  flush(true); // whatever is left is the step still underway
+  return groups;
+}
+
+// Derive a step group's title and status from the events it holds.
+function makeGroup(evs: RunEvent[], i: number, running: boolean): StepGroupData {
+  const last = evs[evs.length - 1];
+  const s = (k: string) => String(last[k] ?? "");
+  let title = "Step";
+  let status: StepGroupData["status"] = running ? "running" : "info";
+  switch (last.event) {
+    case "blueprint_started":
+      title = `Blueprint · ${s("blueprint")}`;
+      status = "info";
+      break;
+    case "node_executed":
+      title = s("node") || "step";
+      status = s("status") === "failed" ? "err" : "ok";
+      break;
+    case "super_step_retried":
+      title = `Retry · step ${s("step")}`;
+      status = "err";
+      break;
+    case "blueprint_completed":
+      title = "Blueprint finished";
+      status = "ok";
+      break;
+    case "run_completed":
+      title = "Agent";
+      status = last.success ? "ok" : "err";
+      break;
+    default:
+      title = running ? "Working…" : "Agent";
+  }
+  return { key: `g${i}`, title, status, events: evs };
+}
+
+function StepGroup({
+  group,
+  defaultOpen,
+}: {
+  group: StepGroupData;
+  defaultOpen: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className={`step step-${group.status}`}>
+      <button
+        type="button"
+        className="step-head"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="step-caret">{open ? "▾" : "▸"}</span>
+        <span className={`dot ${group.status === "running" ? "running" : ""}`} />
+        <span className="step-title">{group.title}</span>
+        <span className="step-count">
+          {group.events.length} event{group.events.length === 1 ? "" : "s"}
+        </span>
+      </button>
+      {open && (
+        <div className="step-body">
+          {group.events.map((ev) => (
+            <EventLine key={ev.seq} ev={ev} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -335,6 +472,8 @@ function BlueprintGraphView({ name }: { name: string }) {
   const [graph, setGraph] = useState<BlueprintGraph | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // "graph" draws the layered diagram; "source" shows the raw YAML definition.
+  const [view, setView] = useState<"graph" | "source">("graph");
 
   useEffect(() => {
     // Guard against a stale response: if `name` changes before the fetch
@@ -369,21 +508,75 @@ function BlueprintGraphView({ name }: { name: string }) {
       <div className="bp-title">
         <strong>{graph.name}</strong>
         <span className="muted">entry: {graph.entry}</span>
+        <div className="bp-tabs">
+          <button
+            type="button"
+            className={view === "graph" ? "active" : ""}
+            onClick={() => setView("graph")}
+          >
+            Graph
+          </button>
+          <button
+            type="button"
+            className={view === "source" ? "active" : ""}
+            onClick={() => setView("source")}
+          >
+            Definition
+          </button>
+        </div>
       </div>
-      <div className="bp-legend">
-        {(Object.keys(EXEC) as Execution[]).map((k) => (
-          <span key={k} className={`bp-chip exec-${k}`}>
-            {EXEC[k].icon} {EXEC[k].label}
-          </span>
-        ))}
-      </div>
-      <BlueprintGraphSvg
-        graph={graph}
-        selected={selected}
-        onSelect={setSelected}
-      />
-      <NodeConfig node={selectedNode} />
+      {view === "graph" ? (
+        <>
+          <div className="bp-legend">
+            {(Object.keys(EXEC) as Execution[]).map((k) => (
+              <span key={k} className={`bp-chip exec-${k}`}>
+                {EXEC[k].icon} {EXEC[k].label}
+              </span>
+            ))}
+          </div>
+          <BlueprintGraphSvg
+            graph={graph}
+            selected={selected}
+            onSelect={setSelected}
+          />
+          <NodeConfig node={selectedNode} />
+        </>
+      ) : (
+        <BlueprintSourceView name={name} />
+      )}
     </div>
+  );
+}
+
+// The blueprint's raw definition (the YAML file as written), fetched on demand so
+// the graph view isn't slowed by a second request that most viewers won't open.
+function BlueprintSourceView({ name }: { name: string }) {
+  const [source, setSource] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSource(null);
+    setErr(null);
+    api
+      .getBlueprintSource(name)
+      .then((s) => {
+        if (!cancelled) setSource(s.source);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [name]);
+
+  if (err) return <div className="error">Failed to load definition: {err}</div>;
+  if (source === null) return <div className="empty">Loading definition…</div>;
+  return (
+    <pre className="bp-source">
+      <code>{source}</code>
+    </pre>
   );
 }
 
