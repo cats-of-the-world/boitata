@@ -97,6 +97,11 @@ pub struct Config {
     /// `--blueprint`; defaults to no retries.
     #[serde(default)]
     pub blueprint_max_retries: Option<usize>,
+    /// Path to the SQLite database used for durable state (blueprint run
+    /// checkpoints, so a cancelled or crashed run can be resumed). Optional;
+    /// defaults to `boitata.db` in the working directory.
+    #[serde(default)]
+    pub state_db: Option<String>,
 }
 
 /// A single MCP server. The transport is inferred from which field is set:
@@ -393,6 +398,7 @@ mod tests {
             auto_compact_threshold: None,
             blueprint_max_steps: None,
             blueprint_max_retries: None,
+            state_db: None,
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("super-secret-key"), "{rendered}");

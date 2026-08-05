@@ -9,6 +9,7 @@ license.workspace = true
 boitata-core = { workspace = true }
 boitata-agent = { workspace = true }
 boitata-acp = { workspace = true }
+boitata-store = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }

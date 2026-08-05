@@ -36,6 +36,7 @@
 // embedded in the binary, and `--blueprint` also accepts a path to a user's own
 // YAML file (see `library.rs`).
 
+mod checkpoint;
 mod container;
 mod human;
 mod library;
@@ -44,6 +45,9 @@ mod sandbox;
 mod state;
 mod yaml;
 
+pub use checkpoint::{
+    Checkpoint, CheckpointStatus, Checkpointer, LoadedCheckpoint, SqliteCheckpointer,
+};
 pub use human::{HumanInterface, StdioHuman};
 pub use library::{discover, load};
 pub use sandbox::Sandbox;
@@ -293,6 +297,30 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// How a graph run begins: fresh from a task, or resumed from a persisted
+/// checkpoint's saved frontier/state/step.
+enum RunStart {
+    Fresh(String),
+    Resume(Checkpoint),
+}
+
+/// Spawn a Ctrl-C watcher that cancels the returned token, paired with a guard
+/// that aborts the watcher when dropped so it never leaks across runs. Shared by
+/// the `run` and `resume` entry points.
+fn install_ctrl_c() -> (CancellationToken, AbortOnDrop) {
+    let cancel = CancellationToken::new();
+    let watcher = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                info!("Interrupt received; cancelling blueprint");
+                cancel.cancel();
+            }
+        })
+    };
+    (cancel, AbortOnDrop(watcher))
+}
+
 /// Exponential backoff before the `attempt`-th super-step retry (1-based):
 /// 250ms, 500ms, 1s, 2s, 4s, capped at 5s.
 fn retry_backoff(attempt: usize) -> Duration {
@@ -352,6 +380,18 @@ pub struct Executor {
     /// env var isn't set in the process environment (the host's resolved config,
     /// so a container inherits it without every value being exported).
     env_defaults: Arc<HashMap<String, String>>,
+    /// Durable checkpoint store. When set (together with `run_id`), the executor
+    /// persists a snapshot at each super-step boundary so the run can be resumed.
+    /// `None` disables checkpointing (runs are in-memory only).
+    checkpointer: Option<Arc<dyn Checkpointer>>,
+    /// Stable id this run is checkpointed under. Required for checkpointing to be
+    /// active; also the key `resume` loads a run by.
+    run_id: Option<String>,
+    /// The label a checkpoint records for the blueprint, and the identity a resume
+    /// verifies against. Lets a caller store the name it can reload the graph by
+    /// (e.g. a server's catalog key) rather than the graph's own `name:` field.
+    /// Defaults to `graph.name` when unset.
+    blueprint_label: Option<String>,
 }
 
 impl Executor {
@@ -369,7 +409,45 @@ impl Executor {
             human: Arc::new(StdioHuman::new()),
             sandbox_backend: None,
             env_defaults: Arc::new(HashMap::new()),
+            checkpointer: None,
+            run_id: None,
+            blueprint_label: None,
         }
+    }
+
+    /// Attach a durable checkpointer. Combined with [`with_run_id`], the executor
+    /// persists a snapshot at each super-step boundary so the run can later be
+    /// resumed (see [`resume`]). Without a `run_id`, checkpointing stays inactive.
+    ///
+    /// [`with_run_id`]: Self::with_run_id
+    /// [`resume`]: Self::resume
+    pub fn with_checkpointer(mut self, checkpointer: Arc<dyn Checkpointer>) -> Self {
+        self.checkpointer = Some(checkpointer);
+        self
+    }
+
+    /// Set the stable id this run is checkpointed under (and the key [`resume`]
+    /// loads it by). Required for checkpointing to take effect.
+    ///
+    /// [`resume`]: Self::resume
+    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = Some(run_id.into());
+        self
+    }
+
+    /// Override the blueprint label a checkpoint records (and that a resume
+    /// verifies against). Set this to the identifier you can reload the graph by —
+    /// e.g. a server's catalog key — when it differs from the graph's `name:`
+    /// field. Defaults to `graph.name`.
+    pub fn with_blueprint_label(mut self, label: impl Into<String>) -> Self {
+        self.blueprint_label = Some(label.into());
+        self
+    }
+
+    /// The label to record/verify for a checkpoint: the caller-set
+    /// [`blueprint_label`](Self::with_blueprint_label), or the graph's own name.
+    fn blueprint_label<'a>(&'a self, graph: &'a Graph) -> &'a str {
+        self.blueprint_label.as_deref().unwrap_or(&graph.name)
     }
 
     /// Fallback env values a `provision` node forwards into a sandbox when a
@@ -463,19 +541,7 @@ impl Executor {
 
     /// Run `graph` on `task`, installing a Ctrl-C watcher that cancels the run.
     pub async fn run(&self, graph: &Graph, task: String) -> anyhow::Result<State> {
-        let cancel = CancellationToken::new();
-        let watcher = {
-            let cancel = cancel.clone();
-            tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    info!("Interrupt received; cancelling blueprint");
-                    cancel.cancel();
-                }
-            })
-        };
-        // Abort the watcher on every exit path, including a panic unwind, so it
-        // can't leak across runs.
-        let _guard = AbortOnDrop(watcher);
+        let (cancel, _guard) = install_ctrl_c();
         self.run_with_cancel(graph, task, cancel).await
     }
 
@@ -488,6 +554,80 @@ impl Executor {
         task: String,
         cancel: CancellationToken,
     ) -> anyhow::Result<State> {
+        self.execute(graph, RunStart::Fresh(task), cancel).await
+    }
+
+    /// Resume the run identified by this executor's [`run_id`] from its last
+    /// persisted checkpoint, installing a Ctrl-C watcher. Requires a checkpointer
+    /// and `run_id` (see [`with_checkpointer`]/[`with_run_id`]) and a matching
+    /// stored checkpoint; errors otherwise.
+    ///
+    /// [`run_id`]: Self::with_run_id
+    /// [`with_checkpointer`]: Self::with_checkpointer
+    /// [`with_run_id`]: Self::with_run_id
+    pub async fn resume(&self, graph: &Graph) -> anyhow::Result<State> {
+        let (cancel, _guard) = install_ctrl_c();
+        self.resume_with_cancel(graph, cancel).await
+    }
+
+    /// Resume from the persisted checkpoint under an external cancellation token.
+    /// Verifies the checkpoint was taken against this same blueprint before
+    /// continuing, so a resume can't run a mismatched graph over stale state.
+    pub async fn resume_with_cancel(
+        &self,
+        graph: &Graph,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<State> {
+        let LoadedCheckpoint {
+            checkpoint,
+            resumable,
+        } = self.load_checkpoint().await?;
+        if !resumable {
+            anyhow::bail!("run already finished (completed or failed); nothing to resume");
+        }
+        let expected = self.blueprint_label(graph);
+        if checkpoint.blueprint != expected {
+            anyhow::bail!(
+                "checkpoint for run was taken against blueprint `{}`, not `{expected}`",
+                checkpoint.blueprint,
+            );
+        }
+        info!(
+            "Resuming blueprint `{}` at super-step {} (frontier {:?})",
+            graph.name,
+            checkpoint.step + 1,
+            checkpoint.frontier
+        );
+        self.execute(graph, RunStart::Resume(checkpoint), cancel)
+            .await
+    }
+
+    /// Load this run's checkpoint, erroring if checkpointing isn't configured or
+    /// no snapshot exists for the `run_id`.
+    async fn load_checkpoint(&self) -> anyhow::Result<LoadedCheckpoint> {
+        let checkpointer = self
+            .checkpointer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("cannot resume: no checkpointer configured"))?;
+        let run_id = self
+            .run_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("cannot resume: no run_id set on the executor"))?;
+        checkpointer
+            .load(run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no checkpoint found for run `{run_id}`"))
+    }
+
+    /// Set up the per-run sandbox manager, run the graph from `start` catching any
+    /// panic so cleanup still runs, then tear down every container the run
+    /// provisioned. Shared by the fresh-run and resume paths.
+    async fn execute(
+        &self,
+        graph: &Graph,
+        start: RunStart,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<State> {
         let sandbox = Arc::new(match &self.sandbox_backend {
             Some(backend) => Sandboxes::new(backend.clone()),
             None => Sandboxes::with_docker(),
@@ -495,7 +635,7 @@ impl Executor {
         // Catch a panic in the graph loop so cleanup still runs, then re-raise it.
         // Sandbox ids are recorded on `sandbox` as they're provisioned, so
         // `cleanup_all` covers them regardless of where the panic happened.
-        let result = AssertUnwindSafe(self.run_graph(graph, task, cancel, &sandbox))
+        let result = AssertUnwindSafe(self.run_graph(graph, start, cancel, &sandbox))
             .catch_unwind()
             .await;
         sandbox.cleanup_all().await;
@@ -505,12 +645,12 @@ impl Executor {
         }
     }
 
-    /// The graph-execution core. `run_with_cancel` wraps this to guarantee
-    /// container cleanup regardless of how it returns.
+    /// The graph-execution core. [`execute`](Self::execute) wraps this to
+    /// guarantee container cleanup regardless of how it returns.
     async fn run_graph(
         &self,
         graph: &Graph,
-        task: String,
+        start: RunStart,
         cancel: CancellationToken,
         sandbox: &Arc<Sandboxes>,
     ) -> anyhow::Result<State> {
@@ -522,13 +662,26 @@ impl Executor {
             );
         }
 
-        info!("Starting blueprint `{}` on task: {task}", graph.name);
-        self.emit(|| AuditEvent::BlueprintStarted {
-            blueprint: graph.name.clone(),
-            entry: graph.entry.clone(),
-        });
-
-        let mut state = State::new(task);
+        // A fresh run starts at the entry with a new state; a resume restores the
+        // frontier, state, and step index from the persisted checkpoint and picks
+        // up the super-step loop there.
+        let (mut state, mut frontier, start_step) = match start {
+            RunStart::Fresh(task) => {
+                info!("Starting blueprint `{}` on task: {task}", graph.name);
+                self.emit(|| AuditEvent::BlueprintStarted {
+                    blueprint: graph.name.clone(),
+                    entry: graph.entry.clone(),
+                });
+                (State::new(task), vec![graph.entry.clone()], 0)
+            }
+            RunStart::Resume(cp) => {
+                self.emit(|| AuditEvent::BlueprintResumed {
+                    blueprint: graph.name.clone(),
+                    step: cp.step,
+                });
+                (cp.state, cp.frontier, cp.step)
+            }
+        };
         let cx = self.node_ctx(cancel.clone(), sandbox.clone());
 
         // The run advances in super-steps: each super-step runs the whole
@@ -536,8 +689,7 @@ impl Executor {
         // routes each to its successors — the union of which (minus END, dedup'd)
         // is the next frontier. `steps` in the completion events counts
         // super-steps; for a linear graph that equals nodes executed.
-        let mut frontier = vec![graph.entry.clone()];
-        for step in 0..self.max_steps {
+        for step in start_step..self.max_steps {
             // A stable order makes concurrent merges and audit events
             // deterministic, and dedups a node reached by several predecessors
             // (fan-in) so it runs once per super-step.
@@ -545,6 +697,8 @@ impl Executor {
             frontier.dedup();
 
             if frontier.is_empty() {
+                self.set_checkpoint_status(CheckpointStatus::Completed)
+                    .await;
                 self.emit(|| AuditEvent::BlueprintCompleted {
                     steps: step,
                     reason: CompletionReason::Completed,
@@ -552,6 +706,11 @@ impl Executor {
                 return Ok(state);
             }
             debug!("Blueprint super-step {}: frontier {frontier:?}", step + 1);
+
+            // Persist this pre-super-step snapshot (frontier + merged state so far)
+            // so a crash or cancellation during the step resumes from exactly here.
+            // Best-effort: a store error is logged, never fatal (see audit).
+            self.save_checkpoint(graph, step, &frontier, &state).await;
 
             // Run the frontier, checkpointing the pre-step state so a hard node
             // error can be retried from a clean slate up to `max_retries` times.
@@ -572,6 +731,8 @@ impl Executor {
                         // failure — the error here is just the interrupted node.
                         Err(_) if cancel.is_cancelled() => {
                             warn!("Blueprint cancelled during super-step {}", step + 1);
+                            self.set_checkpoint_status(CheckpointStatus::Suspended)
+                                .await;
                             self.emit(|| AuditEvent::BlueprintCompleted {
                                 steps: step + 1,
                                 reason: CompletionReason::Cancelled,
@@ -595,6 +756,7 @@ impl Executor {
                             // while staying responsive to cancellation.
                             tokio::select! {
                                 _ = cancel.cancelled() => {
+                                    self.set_checkpoint_status(CheckpointStatus::Suspended).await;
                                     self.emit(|| AuditEvent::BlueprintCompleted {
                                         steps: step + 1,
                                         reason: CompletionReason::Cancelled,
@@ -622,6 +784,7 @@ impl Executor {
                                     output,
                                 });
                             }
+                            self.set_checkpoint_status(CheckpointStatus::Failed).await;
                             self.emit(|| AuditEvent::BlueprintCompleted {
                                 steps: step + 1,
                                 reason: CompletionReason::Error,
@@ -635,6 +798,8 @@ impl Executor {
             // Stop if cancelled while the super-step was running.
             if cancel.is_cancelled() {
                 warn!("Blueprint cancelled during super-step {}", step + 1);
+                self.set_checkpoint_status(CheckpointStatus::Suspended)
+                    .await;
                 self.emit(|| AuditEvent::BlueprintCompleted {
                     steps: step + 1,
                     reason: CompletionReason::Cancelled,
@@ -663,6 +828,7 @@ impl Executor {
                             next: String::new(),
                             output: output.clone(),
                         });
+                        self.set_checkpoint_status(CheckpointStatus::Failed).await;
                         self.emit(|| AuditEvent::BlueprintCompleted {
                             steps: step + 1,
                             reason: CompletionReason::Error,
@@ -687,11 +853,55 @@ impl Executor {
             "Blueprint `{}` hit the step limit ({})",
             graph.name, self.max_steps
         );
+        self.set_checkpoint_status(CheckpointStatus::Failed).await;
         self.emit(|| AuditEvent::BlueprintCompleted {
             steps: self.max_steps,
             reason: CompletionReason::StepLimit,
         });
         Err(BlueprintError::StepLimit(self.max_steps).into())
+    }
+
+    /// Persist a pre-super-step snapshot if checkpointing is active (both a
+    /// checkpointer and a `run_id` are set). Best-effort: a store error is logged
+    /// and the run continues, matching audit's "never break a run" policy.
+    ///
+    /// Invariant: this writes status `Running`, overwriting whatever was stored.
+    /// That's only sound because a terminal `set_checkpoint_status` is *always*
+    /// immediately followed by returning from `run_graph` — so the loop never
+    /// re-reaches this call after setting a terminal status. Any future code that
+    /// sets a terminal status and then continues the loop would be reverted here.
+    async fn save_checkpoint(
+        &self,
+        graph: &Graph,
+        step: usize,
+        frontier: &[String],
+        state: &State,
+    ) {
+        let (Some(checkpointer), Some(run_id)) = (&self.checkpointer, &self.run_id) else {
+            return;
+        };
+        let checkpoint = Checkpoint {
+            run_id: run_id.clone(),
+            blueprint: self.blueprint_label(graph).to_string(),
+            step,
+            frontier: frontier.to_vec(),
+            state: state.clone(),
+        };
+        if let Err(e) = checkpointer.save(&checkpoint).await {
+            warn!("failed to persist checkpoint for run `{run_id}`: {e:#}");
+        }
+    }
+
+    /// Flip this run's stored checkpoint status when it ends (best-effort; a
+    /// no-op when checkpointing is inactive). A `Suspended` run stays resumable;
+    /// `Completed`/`Failed` are terminal.
+    async fn set_checkpoint_status(&self, status: CheckpointStatus) {
+        let (Some(checkpointer), Some(run_id)) = (&self.checkpointer, &self.run_id) else {
+            return;
+        };
+        if let Err(e) = checkpointer.set_status(run_id, status).await {
+            warn!("failed to update checkpoint status for run `{run_id}`: {e:#}");
+        }
     }
 
     /// The successor set after `current`: the node's static targets, its router's
@@ -1461,5 +1671,147 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("approve"), "{err}");
+    }
+
+    // --- Checkpointing / resume ---------------------------------------------
+
+    fn linear_ab(a: Arc<AtomicUsize>, b: Arc<AtomicUsize>) -> Graph {
+        Graph::builder("t", "a")
+            .node(CountingNode {
+                name: "a".into(),
+                status: Status::Ok,
+                runs: a,
+            })
+            .node(CountingNode {
+                name: "b".into(),
+                status: Status::Ok,
+                runs: b,
+            })
+            .edge("a", "b")
+            .edge("b", END)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn full_run_marks_checkpoint_completed() {
+        let store = boitata_store::Store::open_in_memory().unwrap();
+        let cp = Arc::new(SqliteCheckpointer::new(store.clone()));
+        let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let graph = linear_ab(a.clone(), b.clone());
+
+        executor()
+            .with_checkpointer(cp)
+            .with_run_id("run-x")
+            .run(&graph, "task".into())
+            .await
+            .unwrap();
+
+        let rec = store.get_checkpoint("run-x").await.unwrap().unwrap();
+        assert_eq!(rec.status, boitata_store::RunState::Completed);
+        assert!(!rec.status.is_resumable());
+    }
+
+    #[tokio::test]
+    async fn resume_runs_only_the_remaining_frontier() {
+        let store = boitata_store::Store::open_in_memory().unwrap();
+        let cp = Arc::new(SqliteCheckpointer::new(store.clone()));
+        let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let graph = linear_ab(a.clone(), b.clone());
+
+        // Simulate a run that already executed `a` and was interrupted with `b`
+        // still pending: persist a checkpoint at step 1 whose frontier is `[b]`
+        // and whose state already carries `a`'s output.
+        let mut state = State::new("task".into());
+        state.apply(Update::from_node("a", "x".into(), Status::Ok));
+        cp.save(&Checkpoint {
+            run_id: "run-1".into(),
+            blueprint: "t".into(),
+            step: 1,
+            frontier: vec!["b".into()],
+            state,
+        })
+        .await
+        .unwrap();
+
+        let final_state = executor()
+            .with_checkpointer(cp)
+            .with_run_id("run-1")
+            .resume(&graph)
+            .await
+            .unwrap();
+
+        assert_eq!(a.load(Ordering::SeqCst), 0, "a must not re-run on resume");
+        assert_eq!(b.load(Ordering::SeqCst), 1, "b runs to completion");
+        // The resumed state keeps the pre-resume history and adds `b`.
+        assert_eq!(final_state.messages.len(), 2);
+        let rec = store.get_checkpoint("run-1").await.unwrap().unwrap();
+        assert_eq!(rec.status, boitata_store::RunState::Completed);
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_a_mismatched_blueprint() {
+        let store = boitata_store::Store::open_in_memory().unwrap();
+        let cp = Arc::new(SqliteCheckpointer::new(store));
+        cp.save(&Checkpoint {
+            run_id: "run-1".into(),
+            blueprint: "other".into(),
+            step: 0,
+            frontier: vec!["a".into()],
+            state: State::new("task".into()),
+        })
+        .await
+        .unwrap();
+
+        let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let err = executor()
+            .with_checkpointer(cp)
+            .with_run_id("run-1")
+            .resume(&linear_ab(a, b)) // graph name is "t", checkpoint says "other"
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("other"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_a_completed_run() {
+        let store = boitata_store::Store::open_in_memory().unwrap();
+        let cp = Arc::new(SqliteCheckpointer::new(store));
+        cp.save(&Checkpoint {
+            run_id: "run-1".into(),
+            blueprint: "t".into(),
+            step: 1,
+            frontier: vec!["b".into()],
+            state: State::new("task".into()),
+        })
+        .await
+        .unwrap();
+        // A terminal status makes it non-resumable.
+        cp.set_status("run-1", CheckpointStatus::Completed)
+            .await
+            .unwrap();
+
+        let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let err = executor()
+            .with_checkpointer(cp)
+            .with_run_id("run-1")
+            .resume(&linear_ab(a, b))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already finished"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resume_without_a_checkpoint_errors() {
+        let store = boitata_store::Store::open_in_memory().unwrap();
+        let cp = Arc::new(SqliteCheckpointer::new(store));
+        let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let err = executor()
+            .with_checkpointer(cp)
+            .with_run_id("ghost")
+            .resume(&linear_ab(a, b))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no checkpoint"), "{err}");
     }
 }

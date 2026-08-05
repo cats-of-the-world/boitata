@@ -80,11 +80,17 @@ agent-client-protocol = "2"
 # Docker daemon client for the orchestrator's container-provisioning nodes
 bollard = "0.21"
 
+# SQLite for the persistence layer (boitata-store). Only the version is pinned
+# here; the heavy `bundled` feature (compiles SQLite from source) is opted into
+# per-crate in boitata-store, so other consumers aren't forced to build it.
+rusqlite = "0.32"
+
 # Internal crates
 boitata-core = { path = "crates/boitata-core" }
 boitata-agent = { path = "crates/boitata-agent" }
 boitata-orchestrator = { path = "crates/boitata-orchestrator" }
 boitata-acp = { path = "crates/boitata-acp" }
+boitata-store = { path = "crates/boitata-store" }
 
 # Dev-only (shared)
 tokio-test = "0.4"

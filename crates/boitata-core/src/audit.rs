@@ -93,6 +93,9 @@ pub enum AuditEvent {
     },
     /// A blueprint run began.
     BlueprintStarted { blueprint: String, entry: String },
+    /// A blueprint run resumed from a persisted checkpoint, picking up at
+    /// `step` with the checkpoint's saved frontier and state.
+    BlueprintResumed { blueprint: String, step: usize },
     /// A blueprint node ran and routing chose the next node.
     NodeExecuted {
         step: usize,
