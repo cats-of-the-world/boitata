@@ -348,6 +348,10 @@ pub struct Executor {
     /// Sandbox backend for the provisioning nodes; `None` means the default
     /// (local Docker). Overridden for other backends (e.g. Firecracker) or tests.
     sandbox_backend: Option<Arc<dyn Sandbox>>,
+    /// Fallback values a `provision` node forwards into a sandbox when a requested
+    /// env var isn't set in the process environment (the host's resolved config,
+    /// so a container inherits it without every value being exported).
+    env_defaults: Arc<HashMap<String, String>>,
 }
 
 impl Executor {
@@ -364,7 +368,17 @@ impl Executor {
             max_retries: 0,
             human: Arc::new(StdioHuman::new()),
             sandbox_backend: None,
+            env_defaults: Arc::new(HashMap::new()),
         }
+    }
+
+    /// Fallback env values a `provision` node forwards into a sandbox when a
+    /// requested variable isn't set in the process environment — typically the
+    /// host's resolved config (provider/model/base_url/key), so a containerized
+    /// agent inherits it without every value being exported into the environment.
+    pub fn with_env_defaults(mut self, env_defaults: HashMap<String, String>) -> Self {
+        self.env_defaults = Arc::new(env_defaults);
+        self
     }
 
     pub fn with_audit(mut self, audit: Arc<dyn AuditSink>) -> Self {
@@ -442,6 +456,7 @@ impl Executor {
             compact_threshold: self.compact_threshold,
             human: self.human.clone(),
             sandbox,
+            env_defaults: self.env_defaults.clone(),
             cancel,
         }
     }

@@ -205,7 +205,10 @@ async fn run_blueprint(
         .with_policy(policy)
         .with_system_prompt(config.system_prompt.clone())
         .with_max_iterations(config.max_iterations)
-        .with_compact_threshold(config.auto_compact_threshold);
+        .with_compact_threshold(config.auto_compact_threshold)
+        // Forward the host's effective provider config into any sandbox a
+        // `provision` node creates, so an in-container agent inherits it.
+        .with_env_defaults(runtime::provider_env(config));
     if let Some(audit) = audit {
         executor = executor.with_audit(audit);
     }

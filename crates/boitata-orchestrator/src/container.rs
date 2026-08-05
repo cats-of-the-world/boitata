@@ -8,6 +8,7 @@
 //! and destroyed by the executor when the run ends — see
 //! `Executor::run_with_cancel`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -79,17 +80,24 @@ impl ProvisionNode {
         }
     }
 
-    /// Resolve the configured env var *names* to `(name, value)` pairs from the
-    /// process environment. A requested variable that isn't set is skipped with a
-    /// warning that names it only — the value is never touched or logged.
-    fn resolve_env(&self) -> Vec<(String, String)> {
+    /// Resolve the configured env var *names* to `(name, value)` pairs. For each
+    /// name the process environment wins if it's set (non-blank); otherwise
+    /// `defaults` fills it in — the host's resolved config, so a container inherits
+    /// it without every value being exported. A name found in neither is skipped
+    /// with a warning that names it only; the value is never touched or logged.
+    fn resolve_env(&self, defaults: &HashMap<String, String>) -> Vec<(String, String)> {
         let mut resolved = Vec::with_capacity(self.env.len());
         for name in &self.env {
-            match std::env::var(name) {
-                Ok(value) => resolved.push((name.clone(), value)),
-                Err(_) => tracing::warn!(
-                    "provision node `{}`: env var `{name}` is not set in the \
-                     environment; not forwarding it",
+            let value = std::env::var(name)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .or_else(|| defaults.get(name).cloned());
+            match value {
+                Some(value) => resolved.push((name.clone(), value)),
+                None => tracing::warn!(
+                    "provision node `{}`: env var `{name}` is not set (in the \
+                     environment or the resolved config); not forwarding it",
                     self.name
                 ),
             }
@@ -109,7 +117,7 @@ impl Node for ProvisionNode {
 
     async fn run(&self, state: &State, cx: &NodeCtx<'_>) -> anyhow::Result<Update> {
         let image = render(&self.image, state);
-        let env = self.resolve_env();
+        let env = self.resolve_env(&cx.env_defaults);
         let id = cx.sandbox.provision(&image, &env, &cx.cancel).await?;
         Ok(Update::from_node(&self.name, id, Status::Ok))
     }
@@ -409,22 +417,38 @@ mod tests {
         // The value is read from the process environment at run time (never from
         // the blueprint). `PATH` is set in any environment we run in.
         let node = ProvisionNode::new("box", "img", vec!["PATH".to_string()]);
-        let resolved = node.resolve_env();
+        let resolved = node.resolve_env(&HashMap::new());
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].0, "PATH");
         assert!(!resolved[0].1.is_empty());
     }
 
     #[test]
-    fn resolve_env_skips_unset_vars() {
-        // A requested-but-unset variable is dropped (with a name-only warning),
-        // never forwarded as an empty value.
+    fn resolve_env_falls_back_to_defaults_then_skips() {
+        // An unset var takes its value from the defaults (the host's resolved
+        // config); one that's in neither the environment nor the defaults is
+        // skipped rather than forwarded empty.
         let node = ProvisionNode::new(
             "box",
             "img",
-            vec!["BOITATA_DEFINITELY_UNSET_ENV_9c3f2a".to_string()],
+            vec![
+                "BOITATA_UNSET_BUT_DEFAULTED_9c3f2a".to_string(),
+                "BOITATA_DEFINITELY_UNSET_ENV_9c3f2a".to_string(),
+            ],
         );
-        assert!(node.resolve_env().is_empty());
+        let mut defaults = HashMap::new();
+        defaults.insert(
+            "BOITATA_UNSET_BUT_DEFAULTED_9c3f2a".to_string(),
+            "from-config".to_string(),
+        );
+        let resolved = node.resolve_env(&defaults);
+        assert_eq!(
+            resolved,
+            vec![(
+                "BOITATA_UNSET_BUT_DEFAULTED_9c3f2a".to_string(),
+                "from-config".to_string()
+            )]
+        );
     }
 
     #[test]

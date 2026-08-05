@@ -225,6 +225,9 @@ async fn run_blueprint(
         .with_system_prompt(cfg.system_prompt.clone())
         .with_max_iterations(cfg.max_iterations)
         .with_compact_threshold(cfg.auto_compact_threshold)
+        // Forward the server's effective provider config into any sandbox a
+        // `provision` node creates, so an in-container agent inherits it.
+        .with_env_defaults(boitata_core::runtime::provider_env(cfg))
         .with_audit(sink as Arc<dyn AuditSink>)
         .with_max_retries(cfg.blueprint_max_retries);
     if let Some(max_steps) = cfg.blueprint_max_steps {
