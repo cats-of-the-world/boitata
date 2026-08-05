@@ -10,20 +10,73 @@
 //! connects lazily, so a blueprint that provisions nothing never touches Docker.
 
 mod docker;
+mod firecracker;
 
 use std::sync::Arc;
 
 use std::sync::Mutex;
 use std::time::Duration;
 
+use anyhow::{Context, bail};
 use async_trait::async_trait;
+use boitata_core::config::Config;
 use tokio_util::sync::CancellationToken;
 
 /// Give up on a single sandbox teardown that hangs this long, so an unresponsive
 /// daemon can't block the orchestrator's shutdown forever.
 const DESTROY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Cap on captured exec output, shared across backends. A verbose command
+/// shouldn't be able to OOM the orchestrator; output past this is dropped with a
+/// trailing marker.
+pub(crate) const MAX_EXEC_OUTPUT: usize = 1 << 20; // 1 MiB
+
 pub use docker::DockerSandbox;
+pub use firecracker::FirecrackerSandbox;
+
+/// Select a sandbox backend from config. Returns `None` for the default
+/// (`docker`) — the executor already falls back to Docker — and `Some(backend)`
+/// to override it (`firecracker`). A caller wires the result via
+/// [`Executor::with_sandbox`](crate::Executor::with_sandbox).
+///
+/// Errors if `sandbox = "firecracker"` without a `[firecracker]` section, or on
+/// an unknown backend name.
+pub fn build_sandbox(config: &Config) -> anyhow::Result<Option<Arc<dyn Sandbox>>> {
+    match config.sandbox.as_deref() {
+        None | Some("docker") => Ok(None),
+        Some("firecracker") => {
+            let fc = config.firecracker.clone().context(
+                "sandbox = \"firecracker\" requires a [firecracker] config section \
+                 (kernel, rootfs, egress_iface)",
+            )?;
+            Ok(Some(Arc::new(FirecrackerSandbox::new(fc))))
+        }
+        Some(other) => bail!(
+            "unknown sandbox backend `{other}` (expected `docker` or `firecracker`)"
+        ),
+    }
+}
+
+/// Append `chunk` to `output` without exceeding [`MAX_EXEC_OUTPUT`], truncating
+/// the appended slice to the remaining budget on a UTF-8 char boundary so a
+/// single large chunk can't overshoot the cap. Sets `truncated` when it clips.
+pub(crate) fn append_capped(output: &mut String, chunk: &str, truncated: &mut bool) {
+    let remaining = MAX_EXEC_OUTPUT.saturating_sub(output.len());
+    if remaining == 0 {
+        *truncated = !chunk.is_empty();
+        return;
+    }
+    if chunk.len() <= remaining {
+        output.push_str(chunk);
+    } else {
+        let mut end = remaining;
+        while end > 0 && !chunk.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.push_str(&chunk[..end]);
+        *truncated = true;
+    }
+}
 
 /// A backend that can create isolated environments, run commands in them, and
 /// destroy them. `image` is an opaque "what to boot" spec the backend
@@ -179,6 +232,32 @@ mod tests {
             self.destroyed.lock().unwrap().push(id.to_string());
             Ok(())
         }
+    }
+
+    #[test]
+    fn append_capped_bounds_output_on_char_boundary() {
+        let mut out = String::new();
+        let mut truncated = false;
+        // A chunk far larger than the cap is clipped to exactly the budget.
+        let big = "x".repeat(MAX_EXEC_OUTPUT + 100);
+        append_capped(&mut out, &big, &mut truncated);
+        assert_eq!(out.len(), MAX_EXEC_OUTPUT);
+        assert!(truncated);
+
+        // Once full, further chunks are dropped, not appended.
+        append_capped(&mut out, "more", &mut truncated);
+        assert_eq!(out.len(), MAX_EXEC_OUTPUT);
+    }
+
+    #[test]
+    fn append_capped_respects_utf8_boundaries() {
+        // Budget lands mid multi-byte char; the append backs off to a boundary.
+        let mut out = "a".repeat(MAX_EXEC_OUTPUT - 1);
+        let mut truncated = false;
+        append_capped(&mut out, "€", &mut truncated); // 3 bytes, only 1 byte left
+        assert_eq!(out.len(), MAX_EXEC_OUTPUT - 1); // nothing partial appended
+        assert!(truncated);
+        assert!(out.is_char_boundary(out.len()));
     }
 
     #[tokio::test]

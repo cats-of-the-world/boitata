@@ -212,6 +212,10 @@ async fn run_blueprint(
     if let Some(audit) = audit {
         executor = executor.with_audit(audit);
     }
+    // Override the default Docker sandbox backend if configured (e.g. Firecracker).
+    if let Some(backend) = blueprint::build_sandbox(config)? {
+        executor = executor.with_sandbox(backend);
+    }
     if let Some(max_steps) = config.blueprint_max_steps {
         executor = executor.with_max_steps(max_steps);
     }

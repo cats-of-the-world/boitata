@@ -48,11 +48,36 @@ filesystem, so it never needs the host.
 ### Sandboxes (`Sandbox` trait)
 
 `boitata-orchestrator` talks to sandboxes through a small backend trait —
-`provision` / `exec` / `endpoint` / `destroy`. The current backend is **Docker**
-(via `bollard`); a **Firecracker microVM** backend is planned behind the same
-trait for VM-grade isolation. The backend connects lazily, so blueprints that use
-no sandbox never require a daemon, and the executor **auto-destroys every sandbox
-a run provisioned** when the run ends — success, failure, or cancel.
+`provision` / `exec` / `endpoint` / `destroy`. Two backends implement it, selected
+by `sandbox` in config (default `docker`):
+
+- **Docker** (via `bollard`) — each sandbox is an ephemeral container. Shares the
+  host kernel, so it isolates the *work* but isn't a hard trust boundary.
+- **Firecracker** (`sandbox = "firecracker"`) — each sandbox is a microVM with its
+  own kernel, for VM-grade isolation. It boots a VM from a configured kernel + a
+  per-VM copy of the rootfs on a private `/30` **TAP** link, runs `exec`/`checkout`
+  in the guest over **SSH**, and reaches the in-VM `boitata-agent` over plain
+  **TCP/ACP** on the guest IP. The ephemeral SSH key and forwarded env are handed
+  to the guest via Firecracker's metadata service (MMDS), never a log or the kernel
+  cmdline. Requires `/dev/kvm`, `CAP_NET_ADMIN` (for the TAP + NAT), a `firecracker`
+  binary, and a `[firecracker]` config section:
+
+  ```toml
+  sandbox = "firecracker"
+  [firecracker]
+  kernel = "/var/lib/boitata/vmlinux"
+  rootfs = "/var/lib/boitata/rootfs.ext4"  # copied per VM
+  egress_iface = "eth0"                     # host NIC to NAT the guest out of
+  # ssh_user = "root", vcpus = 2, mem_mib = 1024  (defaults)
+  ```
+
+  > The rootfs must carry `sshd`, a boot hook that installs the MMDS-provided key
+  > and env, the toolchain, and `boitata-agent`. That image recipe + a pinned guest
+  > kernel are the next step (see the [roadmap](../project/roadmap.md)).
+
+The backend connects lazily, so blueprints that use no sandbox never require a
+daemon or KVM, and the executor **auto-destroys every sandbox a run provisioned**
+when the run ends — success, failure, or cancel.
 
 ### Container blueprint nodes
 
