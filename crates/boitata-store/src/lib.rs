@@ -69,7 +69,7 @@ impl Store {
         Self::init(Connection::open_in_memory().context("failed to open in-memory store")?)
     }
 
-    fn init(conn: Connection) -> anyhow::Result<Self> {
+    fn init(mut conn: Connection) -> anyhow::Result<Self> {
         // WAL lets a reader run concurrently with the writer; NORMAL sync is the
         // usual WAL pairing (durable across app crashes, may lose only the last
         // txn on OS crash — fine for resumable checkpoints).
@@ -77,7 +77,7 @@ impl Store {
             .context("failed to enable WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .context("failed to set synchronous mode")?;
-        migrate(&conn)?;
+        migrate(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -92,7 +92,11 @@ impl Store {
     {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().expect("store connection mutex poisoned");
+            // A poisoned mutex (a prior closure panicked mid-query) surfaces as a
+            // recoverable error rather than cascading panics on every later call.
+            let guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("store connection mutex poisoned: {e}"))?;
             f(&guard)
         })
         .await
@@ -102,17 +106,26 @@ impl Store {
 
 /// Apply every migration past the database's current `user_version`, advancing
 /// the version after each so re-opening is idempotent.
-fn migrate(conn: &Connection) -> anyhow::Result<()> {
+///
+/// Each migration runs in its own transaction so the DDL and the `user_version`
+/// bump commit atomically: a crash between them can't leave the schema applied
+/// but the version stale (which would re-run the migration and fail on next open).
+fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
     let current: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .context("failed to read schema version")?;
     let current = current as usize;
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
-        conn.execute_batch(sql)
+        let tx = conn
+            .transaction()
+            .with_context(|| format!("failed to begin migration v{}", i + 1))?;
+        tx.execute_batch(sql)
             .with_context(|| format!("failed to apply migration v{}", i + 1))?;
         // `user_version` doesn't accept bind params; the value is a trusted index.
-        conn.pragma_update(None, "user_version", (i + 1) as i64)
+        tx.pragma_update(None, "user_version", (i + 1) as i64)
             .with_context(|| format!("failed to record schema version v{}", i + 1))?;
+        tx.commit()
+            .with_context(|| format!("failed to commit migration v{}", i + 1))?;
     }
     Ok(())
 }

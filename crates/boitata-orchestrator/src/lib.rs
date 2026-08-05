@@ -45,7 +45,9 @@ mod sandbox;
 mod state;
 mod yaml;
 
-pub use checkpoint::{Checkpoint, CheckpointStatus, Checkpointer, SqliteCheckpointer};
+pub use checkpoint::{
+    Checkpoint, CheckpointStatus, Checkpointer, LoadedCheckpoint, SqliteCheckpointer,
+};
 pub use human::{HumanInterface, StdioHuman};
 pub use library::{discover, load};
 pub use sandbox::Sandbox;
@@ -576,8 +578,11 @@ impl Executor {
         graph: &Graph,
         cancel: CancellationToken,
     ) -> anyhow::Result<State> {
-        let checkpoint = self.load_checkpoint().await?;
-        if !checkpoint.resumable {
+        let LoadedCheckpoint {
+            checkpoint,
+            resumable,
+        } = self.load_checkpoint().await?;
+        if !resumable {
             anyhow::bail!("run already finished (completed or failed); nothing to resume");
         }
         let expected = self.blueprint_label(graph);
@@ -593,12 +598,13 @@ impl Executor {
             checkpoint.step + 1,
             checkpoint.frontier
         );
-        self.execute(graph, RunStart::Resume(checkpoint), cancel).await
+        self.execute(graph, RunStart::Resume(checkpoint), cancel)
+            .await
     }
 
     /// Load this run's checkpoint, erroring if checkpointing isn't configured or
     /// no snapshot exists for the `run_id`.
-    async fn load_checkpoint(&self) -> anyhow::Result<Checkpoint> {
+    async fn load_checkpoint(&self) -> anyhow::Result<LoadedCheckpoint> {
         let checkpointer = self
             .checkpointer
             .as_ref()
@@ -691,7 +697,8 @@ impl Executor {
             frontier.dedup();
 
             if frontier.is_empty() {
-                self.set_checkpoint_status(CheckpointStatus::Completed).await;
+                self.set_checkpoint_status(CheckpointStatus::Completed)
+                    .await;
                 self.emit(|| AuditEvent::BlueprintCompleted {
                     steps: step,
                     reason: CompletionReason::Completed,
@@ -724,7 +731,8 @@ impl Executor {
                         // failure — the error here is just the interrupted node.
                         Err(_) if cancel.is_cancelled() => {
                             warn!("Blueprint cancelled during super-step {}", step + 1);
-                            self.set_checkpoint_status(CheckpointStatus::Suspended).await;
+                            self.set_checkpoint_status(CheckpointStatus::Suspended)
+                                .await;
                             self.emit(|| AuditEvent::BlueprintCompleted {
                                 steps: step + 1,
                                 reason: CompletionReason::Cancelled,
@@ -790,7 +798,8 @@ impl Executor {
             // Stop if cancelled while the super-step was running.
             if cancel.is_cancelled() {
                 warn!("Blueprint cancelled during super-step {}", step + 1);
-                self.set_checkpoint_status(CheckpointStatus::Suspended).await;
+                self.set_checkpoint_status(CheckpointStatus::Suspended)
+                    .await;
                 self.emit(|| AuditEvent::BlueprintCompleted {
                     steps: step + 1,
                     reason: CompletionReason::Cancelled,
@@ -855,7 +864,19 @@ impl Executor {
     /// Persist a pre-super-step snapshot if checkpointing is active (both a
     /// checkpointer and a `run_id` are set). Best-effort: a store error is logged
     /// and the run continues, matching audit's "never break a run" policy.
-    async fn save_checkpoint(&self, graph: &Graph, step: usize, frontier: &[String], state: &State) {
+    ///
+    /// Invariant: this writes status `Running`, overwriting whatever was stored.
+    /// That's only sound because a terminal `set_checkpoint_status` is *always*
+    /// immediately followed by returning from `run_graph` — so the loop never
+    /// re-reaches this call after setting a terminal status. Any future code that
+    /// sets a terminal status and then continues the loop would be reverted here.
+    async fn save_checkpoint(
+        &self,
+        graph: &Graph,
+        step: usize,
+        frontier: &[String],
+        state: &State,
+    ) {
         let (Some(checkpointer), Some(run_id)) = (&self.checkpointer, &self.run_id) else {
             return;
         };
@@ -865,9 +886,6 @@ impl Executor {
             step,
             frontier: frontier.to_vec(),
             state: state.clone(),
-            // A running snapshot is by definition resumable; the stored status is
-            // Running until a terminal `set_status` flips it.
-            resumable: true,
         };
         if let Err(e) = checkpointer.save(&checkpoint).await {
             warn!("failed to persist checkpoint for run `{run_id}`: {e:#}");
@@ -1712,7 +1730,6 @@ mod tests {
             step: 1,
             frontier: vec!["b".into()],
             state,
-            resumable: true,
         })
         .await
         .unwrap();
@@ -1742,7 +1759,6 @@ mod tests {
             step: 0,
             frontier: vec!["a".into()],
             state: State::new("task".into()),
-            resumable: true,
         })
         .await
         .unwrap();
@@ -1767,7 +1783,6 @@ mod tests {
             step: 1,
             frontier: vec!["b".into()],
             state: State::new("task".into()),
-            resumable: true,
         })
         .await
         .unwrap();

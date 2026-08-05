@@ -18,12 +18,16 @@
 //! correct for agent/tool/script/human graphs; sandbox resumption needs
 //! persistent sandboxes (tracked separately).
 
+use anyhow::Context;
 use async_trait::async_trait;
 
 use crate::state::State;
 use boitata_store::{CheckpointUpsert, RunState, Store};
 
-/// A resumable snapshot of a blueprint run at a super-step boundary.
+/// A snapshot of a blueprint run at a super-step boundary — everything needed to
+/// resume it. This is a pure snapshot: whether a stored run is *still* resumable
+/// is a property of its status, surfaced by [`load`](Checkpointer::load) as
+/// [`LoadedCheckpoint::resumable`], not a field here.
 #[derive(Debug, Clone)]
 pub struct Checkpoint {
     /// The run this snapshot belongs to (the executor's `run_id`).
@@ -37,9 +41,15 @@ pub struct Checkpoint {
     pub frontier: Vec<String>,
     /// The merged graph state as of `step`.
     pub state: State,
-    /// Whether this checkpoint represents a resumable run. A running snapshot the
-    /// executor writes is always resumable (`true`); on load it reflects the
-    /// stored status, so a resume can refuse a run that already completed/failed.
+}
+
+/// A checkpoint read back from storage, plus whether the run it belongs to can
+/// still be resumed (i.e. its stored status is running/suspended, not a terminal
+/// completed/failed). Distinct from [`Checkpoint`] so the resumability — which is
+/// only meaningful on the read path — never appears as a writable field.
+#[derive(Debug, Clone)]
+pub struct LoadedCheckpoint {
+    pub checkpoint: Checkpoint,
     pub resumable: bool,
 }
 
@@ -70,8 +80,8 @@ pub trait Checkpointer: Send + Sync {
     /// Persist a pre-super-step snapshot, marking the run as still running.
     async fn save(&self, checkpoint: &Checkpoint) -> anyhow::Result<()>;
 
-    /// Load a run's latest checkpoint, if one exists.
-    async fn load(&self, run_id: &str) -> anyhow::Result<Option<Checkpoint>>;
+    /// Load a run's latest checkpoint (with its resumability), if one exists.
+    async fn load(&self, run_id: &str) -> anyhow::Result<Option<LoadedCheckpoint>>;
 
     /// Flip a run's stored status when it ends (or is suspended).
     async fn set_status(&self, run_id: &str, status: CheckpointStatus) -> anyhow::Result<()>;
@@ -106,23 +116,29 @@ impl Checkpointer for SqliteCheckpointer {
             .await
     }
 
-    async fn load(&self, run_id: &str) -> anyhow::Result<Option<Checkpoint>> {
+    async fn load(&self, run_id: &str) -> anyhow::Result<Option<LoadedCheckpoint>> {
         let Some(record) = self.store.get_checkpoint(run_id).await? else {
             return Ok(None);
         };
-        let state: State = serde_json::from_str(&record.state)?;
-        Ok(Some(Checkpoint {
-            run_id: record.run_id,
-            blueprint: record.blueprint,
-            step: record.step as usize,
-            frontier: record.frontier,
-            state,
-            resumable: record.status.is_resumable(),
+        let state: State = serde_json::from_str(&record.state)
+            .with_context(|| format!("deserializing state for checkpoint `{}`", record.run_id))?;
+        let resumable = record.status.is_resumable();
+        Ok(Some(LoadedCheckpoint {
+            checkpoint: Checkpoint {
+                run_id: record.run_id,
+                blueprint: record.blueprint,
+                step: record.step as usize,
+                frontier: record.frontier,
+                state,
+            },
+            resumable,
         }))
     }
 
     async fn set_status(&self, run_id: &str, status: CheckpointStatus) -> anyhow::Result<()> {
-        self.store.set_checkpoint_status(run_id, status.into()).await
+        self.store
+            .set_checkpoint_status(run_id, status.into())
+            .await
     }
 }
 
@@ -136,25 +152,30 @@ mod tests {
         let cp = SqliteCheckpointer::new(store);
 
         let mut state = State::new("fix the bug".to_string());
-        state.vars.insert("verify".to_string(), "exit 1".to_string());
+        state
+            .vars
+            .insert("verify".to_string(), "exit 1".to_string());
         let checkpoint = Checkpoint {
             run_id: "run-1".to_string(),
             blueprint: "fix_test".to_string(),
             step: 2,
             frontier: vec!["fix".to_string()],
             state,
-            resumable: true,
         };
         cp.save(&checkpoint).await.unwrap();
 
         let loaded = cp.load("run-1").await.unwrap().unwrap();
-        assert!(loaded.resumable, "a saved running snapshot loads as resumable");
-        assert_eq!(loaded.blueprint, "fix_test");
-        assert_eq!(loaded.step, 2);
-        assert_eq!(loaded.frontier, vec!["fix".to_string()]);
-        assert_eq!(loaded.state.task, "fix the bug");
+        assert!(
+            loaded.resumable,
+            "a saved running snapshot loads as resumable"
+        );
+        let cp = loaded.checkpoint;
+        assert_eq!(cp.blueprint, "fix_test");
+        assert_eq!(cp.step, 2);
+        assert_eq!(cp.frontier, vec!["fix".to_string()]);
+        assert_eq!(cp.state.task, "fix the bug");
         assert_eq!(
-            loaded.state.vars.get("verify").map(String::as_str),
+            cp.state.vars.get("verify").map(String::as_str),
             Some("exit 1")
         );
     }

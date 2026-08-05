@@ -52,6 +52,15 @@ impl RunState {
     }
 }
 
+impl std::fmt::Display for RunState {
+    /// The lowercase status label (`running`/`suspended`/`completed`/`failed`);
+    /// the single source of truth for how a status renders, so callers don't
+    /// re-implement the mapping.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The fields needed to write (insert or replace) a checkpoint. `frontier` and
 /// `state` are JSON the caller serialized; the store treats them as opaque text.
 pub struct CheckpointUpsert {
@@ -206,8 +215,8 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<CheckpointRecord> 
         frontier: parse_frontier(&frontier, row)?,
         state: row.get(5)?,
         status: parse_status(&status, row)?,
-        created_at: parse_time(&created_at, row)?,
-        updated_at: parse_time(&updated_at, row)?,
+        created_at: parse_time(&created_at, 7, row)?,
+        updated_at: parse_time(&updated_at, 8, row)?,
     })
 }
 
@@ -223,10 +232,10 @@ fn parse_status(s: &str, _row: &rusqlite::Row<'_>) -> rusqlite::Result<RunState>
     RunState::from_str(s).map_err(|e| conv_err(6, e))
 }
 
-fn parse_time(s: &str, _row: &rusqlite::Row<'_>) -> rusqlite::Result<DateTime<Utc>> {
+fn parse_time(s: &str, idx: usize, _row: &rusqlite::Row<'_>) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| conv_err(7, e))
+        .map_err(|e| conv_err(idx, e))
 }
 
 /// Wrap a conversion failure (from serde/chrono/our own parsing) as the rusqlite
@@ -271,7 +280,10 @@ mod tests {
     #[tokio::test]
     async fn upsert_then_get_roundtrips() {
         let store = Store::open_in_memory().unwrap();
-        store.upsert_checkpoint(sample("run-1", RunState::Running)).await.unwrap();
+        store
+            .upsert_checkpoint(sample("run-1", RunState::Running))
+            .await
+            .unwrap();
 
         let got = store.get_checkpoint("run-1").await.unwrap().unwrap();
         assert_eq!(got.run_id, "run-1");
@@ -291,7 +303,10 @@ mod tests {
     #[tokio::test]
     async fn upsert_replaces_and_preserves_created_at() {
         let store = Store::open_in_memory().unwrap();
-        store.upsert_checkpoint(sample("run-1", RunState::Running)).await.unwrap();
+        store
+            .upsert_checkpoint(sample("run-1", RunState::Running))
+            .await
+            .unwrap();
         let first = store.get_checkpoint("run-1").await.unwrap().unwrap();
 
         let mut next = sample("run-1", RunState::Running);
@@ -300,16 +315,28 @@ mod tests {
         let second = store.get_checkpoint("run-1").await.unwrap().unwrap();
 
         assert_eq!(second.step, 7);
-        assert_eq!(second.created_at, first.created_at, "created_at is preserved");
+        assert_eq!(
+            second.created_at, first.created_at,
+            "created_at is preserved"
+        );
         assert!(second.updated_at >= first.updated_at);
     }
 
     #[tokio::test]
     async fn set_status_and_resumable_filter() {
         let store = Store::open_in_memory().unwrap();
-        store.upsert_checkpoint(sample("a", RunState::Running)).await.unwrap();
-        store.upsert_checkpoint(sample("b", RunState::Running)).await.unwrap();
-        store.set_checkpoint_status("b", RunState::Completed).await.unwrap();
+        store
+            .upsert_checkpoint(sample("a", RunState::Running))
+            .await
+            .unwrap();
+        store
+            .upsert_checkpoint(sample("b", RunState::Running))
+            .await
+            .unwrap();
+        store
+            .set_checkpoint_status("b", RunState::Completed)
+            .await
+            .unwrap();
 
         let resumable = store.list_checkpoints(true).await.unwrap();
         assert_eq!(resumable.len(), 1);
@@ -322,7 +349,10 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_the_row() {
         let store = Store::open_in_memory().unwrap();
-        store.upsert_checkpoint(sample("a", RunState::Running)).await.unwrap();
+        store
+            .upsert_checkpoint(sample("a", RunState::Running))
+            .await
+            .unwrap();
         store.delete_checkpoint("a").await.unwrap();
         assert!(store.get_checkpoint("a").await.unwrap().is_none());
     }

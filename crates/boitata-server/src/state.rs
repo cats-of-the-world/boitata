@@ -99,7 +99,9 @@ const MAX_RUNS: usize = 1000;
 pub enum RunStatus {
     Running,
     Succeeded,
-    Failed { error: Option<String> },
+    Failed {
+        error: Option<String>,
+    },
     Cancelled,
     /// Interrupted (cancelled or crashed) but has a persisted checkpoint, so it
     /// can be resumed via `POST /api/runs/{id}/resume`. Used for runs surfaced

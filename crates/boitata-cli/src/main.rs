@@ -17,7 +17,7 @@ use boitata_core::provider::Provider;
 use boitata_core::runtime;
 use boitata_core::tools::{ToolPolicy, ToolRegistry};
 use boitata_orchestrator as blueprint;
-use boitata_store::{RunState, Store};
+use boitata_store::Store;
 
 /// Default audit log path when the config doesn't set `audit_log`.
 const DEFAULT_AUDIT_LOG: &str = "boitata-audit.log";
@@ -245,8 +245,15 @@ async fn resume_blueprint(
 
     let graph = blueprint::load(&blueprint_path)?;
     let checkpointer = open_checkpointer(&config)?;
-    let executor =
-        build_blueprint_executor(&config, provider, tools, audit, policy, checkpointer, run_id);
+    let executor = build_blueprint_executor(
+        &config,
+        provider,
+        tools,
+        audit,
+        policy,
+        checkpointer,
+        run_id,
+    );
 
     let state = executor.resume(&graph).await?;
     report_blueprint_state(&blueprint_path, &state)
@@ -265,12 +272,15 @@ async fn list_runs(config_path: Option<String>, all: bool) -> anyhow::Result<()>
         return Ok(());
     }
 
-    println!("{:<36}  {:<9}  {:>5}  {:<16}  TASK", "RUN ID", "STATUS", "STEP", "BLUEPRINT");
+    println!(
+        "{:<36}  {:<9}  {:>5}  {:<16}  TASK",
+        "RUN ID", "STATUS", "STEP", "BLUEPRINT"
+    );
     for r in runs {
         println!(
             "{:<36}  {:<9}  {:>5}  {:<16}  {}",
             r.run_id,
-            run_state_label(r.status),
+            r.status, // RunState: Display renders the lowercase label
             r.step,
             truncate(&r.blueprint, 16),
             truncate(&r.task, 60),
@@ -362,24 +372,19 @@ fn open_audit(config: &Config, run_id: &str) -> Option<Arc<FileAuditLog>> {
             Some(Arc::new(audit))
         }
         Err(e) => {
-            tracing::warn!("failed to open audit log `{audit_path}`: {e}; continuing without audit");
+            tracing::warn!(
+                "failed to open audit log `{audit_path}`: {e}; continuing without audit"
+            );
             None
         }
     }
 }
 
-/// Lowercase display label for a run's stored status.
-fn run_state_label(status: RunState) -> &'static str {
-    match status {
-        RunState::Running => "running",
-        RunState::Suspended => "suspended",
-        RunState::Completed => "completed",
-        RunState::Failed => "failed",
-    }
-}
-
 /// Truncate `s` to `max` chars, appending `…` when shortened, for tidy columns.
 fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
     if s.chars().count() <= max {
         s.to_string()
     } else {

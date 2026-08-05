@@ -7,8 +7,9 @@ license.workspace = true
 
 [dependencies]
 # Embedded SQLite. `bundled` compiles SQLite in, so there's no system-library
-# dependency and the schema behaves identically everywhere.
-rusqlite = { workspace = true }
+# dependency and the schema behaves identically everywhere. Opted in here (not
+# at the workspace level) so only this crate pays the from-source build.
+rusqlite = { workspace = true, features = ["bundled"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
