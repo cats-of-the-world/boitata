@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use boitata_agent::{Agent, Task};
 use boitata_core::audit::AuditSink;
-use boitata_orchestrator::Executor;
+use boitata_orchestrator::{Executor, SqliteCheckpointer};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/events", get(run_events))
         .route("/api/runs/{id}/cancel", post(cancel_run))
+        .route("/api/runs/{id}/resume", post(resume_run))
         .route("/api/blueprints", get(list_blueprints))
         .route("/api/blueprints/{name}", get(get_blueprint))
         .route("/api/blueprints/{name}/source", get(get_blueprint_source))
@@ -155,7 +156,17 @@ async fn run_job(app: AppState, handle: Arc<RunHandle>, task: String, blueprint:
         Some(name) => run_blueprint(&app, handle.clone(), sink, name, task).await,
         None => run_agent(&app, handle.clone(), sink, task).await,
     };
+    record_outcome(&handle, outcome, &mut guard);
+}
 
+/// Record a run's final status and result on its handle, then disarm the
+/// [`FinishGuard`] so its `Drop` only fires `finished`. Shared by the fresh-run
+/// and resume paths.
+fn record_outcome(
+    handle: &Arc<RunHandle>,
+    outcome: anyhow::Result<RunResult>,
+    guard: &mut FinishGuard,
+) {
     let status = if handle.cancel.is_cancelled() {
         RunStatus::Cancelled
     } else {
@@ -175,6 +186,39 @@ async fn run_job(app: AppState, handle: Arc<RunHandle>, task: String, blueprint:
     *handle.status.write().unwrap() = status;
     guard.recorded = true; // outcome recorded; Drop now only cancels `finished`
     info!(id = %handle.id, "run finished");
+}
+
+/// The background task for a resumed run: rebuild the executor and continue the
+/// blueprint from its persisted checkpoint, then record the outcome.
+async fn resume_job(app: AppState, handle: Arc<RunHandle>, name: String) {
+    let mut guard = FinishGuard {
+        handle: handle.clone(),
+        recorded: false,
+    };
+    let sink = Arc::new(ChannelAuditSink::new(
+        handle.tx.clone(),
+        handle.history.clone(),
+    ));
+    let outcome = resume_blueprint(&app, handle.clone(), sink, &name).await;
+    record_outcome(&handle, outcome, &mut guard);
+}
+
+/// Continue a blueprint run from its checkpoint. Mirrors [`run_blueprint`] but
+/// calls the executor's resume path (no task — it's restored from the
+/// checkpoint).
+async fn resume_blueprint(
+    app: &AppState,
+    handle: Arc<RunHandle>,
+    sink: Arc<ChannelAuditSink>,
+    name: &str,
+) -> anyhow::Result<RunResult> {
+    let path = resolve_blueprint_path(app, name)?;
+    let graph = boitata_orchestrator::load(&path)?;
+    let executor = blueprint_executor(app, sink, handle.id, name);
+    let state = executor
+        .resume_with_cancel(&graph, handle.cancel.clone())
+        .await?;
+    Ok(RunResult::from_state(&state))
 }
 
 async fn run_agent(
@@ -209,18 +253,42 @@ async fn run_blueprint(
     name: &str,
     task: String,
 ) -> anyhow::Result<RunResult> {
-    let cfg = &app.config;
     // Resolve the name against the vetted catalog (create_run already checked it,
     // but this keeps the network never able to pick an arbitrary path). Load from
     // the file rather than a compiled cache so an edited blueprint is picked up.
+    let path = resolve_blueprint_path(app, name)?;
+    let graph = boitata_orchestrator::load(&path)?;
+    let executor = blueprint_executor(app, sink, handle.id, name);
+    let state = executor
+        .run_with_cancel(&graph, task, handle.cancel.clone())
+        .await?;
+    Ok(RunResult::from_state(&state))
+}
+
+/// Resolve a catalog blueprint name to its file path, rejecting unknown names
+/// (the network can never pick an arbitrary path).
+fn resolve_blueprint_path(app: &AppState, name: &str) -> anyhow::Result<String> {
     let path = app
         .blueprints
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("unknown blueprint `{name}`"))?;
-    let path = path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("blueprint path for `{name}` is not valid UTF-8"))?;
-    let graph = boitata_orchestrator::load(path)?;
+    path.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("blueprint path for `{name}` is not valid UTF-8"))
+}
+
+/// Assemble a blueprint executor with the server's provider/tools/policy/agent
+/// settings, the run's audit sink, and a checkpointer keyed by the run id — so
+/// the run is resumable (see [`resume_run`]). `name` is the catalog key, recorded
+/// as the checkpoint's blueprint label so a resume can reload the same graph.
+fn blueprint_executor(
+    app: &AppState,
+    sink: Arc<ChannelAuditSink>,
+    run_id: Uuid,
+    name: &str,
+) -> Executor {
+    let cfg = &app.config;
+    let checkpointer = Arc::new(SqliteCheckpointer::new(app.store.clone()));
     let mut executor = Executor::new(app.provider.clone(), app.tools.clone())
         .with_policy((*app.policy).clone())
         .with_system_prompt(cfg.system_prompt.clone())
@@ -230,17 +298,19 @@ async fn run_blueprint(
         // `provision` node creates, so an in-container agent inherits it.
         .with_env_defaults(boitata_core::runtime::provider_env(cfg))
         .with_audit(sink as Arc<dyn AuditSink>)
+        .with_checkpointer(checkpointer)
+        .with_run_id(run_id.to_string())
+        .with_blueprint_label(name)
         .with_max_retries(cfg.blueprint_max_retries);
     if let Some(max_steps) = cfg.blueprint_max_steps {
         executor = executor.with_max_steps(max_steps);
     }
-    let state = executor
-        .run_with_cancel(&graph, task, handle.cancel.clone())
-        .await?;
-    Ok(RunResult::from_state(&state))
+    executor
 }
 
-/// `GET /api/runs` — newest first.
+/// `GET /api/runs` — newest first. Includes both in-memory runs and resumable
+/// runs recovered from the state database (e.g. after a restart), the latter
+/// reported as `suspended`. In-memory entries take precedence for a given id.
 async fn list_runs(State(app): State<AppState>) -> Json<Vec<RunSummary>> {
     let mut runs: Vec<RunSummary> = app
         .runs
@@ -249,6 +319,27 @@ async fn list_runs(State(app): State<AppState>) -> Json<Vec<RunSummary>> {
         .values()
         .map(|h| h.summary())
         .collect();
+    let live: std::collections::HashSet<Uuid> = runs.iter().map(|r| r.id).collect();
+
+    // Fold in resumable checkpoints not already represented by a live run.
+    if let Ok(records) = app.store.list_checkpoints(true).await {
+        for r in records {
+            let Ok(id) = Uuid::parse_str(&r.run_id) else {
+                continue;
+            };
+            if live.contains(&id) {
+                continue;
+            }
+            runs.push(RunSummary {
+                id,
+                task: r.task,
+                blueprint: Some(r.blueprint),
+                status: RunStatus::Suspended,
+                started_at: r.updated_at,
+            });
+        }
+    }
+
     runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     Json(runs)
 }
@@ -275,6 +366,65 @@ async fn cancel_run(
     let handle = app.get_run(id).ok_or_else(ApiError::not_found)?;
     handle.cancel.cancel();
     Ok(StatusCode::ACCEPTED)
+}
+
+/// `POST /api/runs/{id}/resume` — continue an interrupted blueprint run from its
+/// persisted checkpoint, spawning it under the same id. Works even after a server
+/// restart, when the run is no longer in the in-memory registry. Returns `{ id }`.
+async fn resume_run(
+    State(app): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // A run already executing in memory must not be resumed concurrently.
+    if let Some(handle) = app.get_run(id)
+        && matches!(*handle.status.read().unwrap(), RunStatus::Running)
+    {
+        return Err(ApiError::conflict("run is already running"));
+    }
+
+    let record = app
+        .store
+        .get_checkpoint(&id.to_string())
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to read checkpoint: {e:#}")))?
+        .ok_or_else(|| ApiError::not_found_msg("no checkpoint to resume for this run"))?;
+
+    if !record.status.is_resumable() {
+        return Err(ApiError::conflict(
+            "run is not resumable (it already completed or failed)",
+        ));
+    }
+
+    // The checkpoint's blueprint label is the catalog name the run was started
+    // with; it must still be one the server offers (never an arbitrary path).
+    let name = record.blueprint.clone();
+    if !app.blueprints.contains_key(&name) {
+        return Err(ApiError::bad_request(format!(
+            "cannot resume: blueprint `{name}` is not in the server's catalog"
+        )));
+    }
+
+    // Rebuild the run handle under the same id with fresh event plumbing and a new
+    // cancel token, then continue it in the background.
+    let (tx, _) = broadcast::channel(1024);
+    let history = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::new(RunHandle {
+        id,
+        task: record.task.clone(),
+        blueprint: Some(name.clone()),
+        started_at: chrono::Utc::now(),
+        status: std::sync::RwLock::new(RunStatus::Running),
+        result: std::sync::RwLock::new(None),
+        cancel: CancellationToken::new(),
+        finished: CancellationToken::new(),
+        tx,
+        history,
+    });
+    app.register_run(handle.clone());
+    info!(%id, blueprint = %name, "run resumed");
+
+    tokio::spawn(resume_job(app.clone(), handle, name));
+    Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))))
 }
 
 /// `GET /api/blueprints` — the names of the blueprints the server can run (from
@@ -427,6 +577,12 @@ impl ApiError {
             message: message.into(),
         }
     }
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -461,7 +617,8 @@ mod tests {
         let provider = runtime::build_provider(&config).unwrap();
         let tools = runtime::build_tools(&config).await.unwrap();
         let policy = runtime::build_policy(&config).unwrap();
-        AppState::new(config, provider, tools, policy, blueprints)
+        let store = boitata_store::Store::open_in_memory().unwrap();
+        AppState::new(config, provider, tools, policy, blueprints, store)
     }
 
     async fn body_json(resp: Response) -> serde_json::Value {
@@ -480,6 +637,92 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await, json!([]));
+    }
+
+    /// Insert a checkpoint row directly, to exercise the resume/listing paths
+    /// without actually running a graph.
+    async fn put_checkpoint(
+        store: &boitata_store::Store,
+        id: Uuid,
+        blueprint: &str,
+        status: boitata_store::RunState,
+    ) {
+        store
+            .upsert_checkpoint(boitata_store::CheckpointUpsert {
+                run_id: id.to_string(),
+                blueprint: blueprint.to_string(),
+                task: "resume me".to_string(),
+                step: 1,
+                frontier: vec!["b".to_string()],
+                state: r#"{"task":"resume me","messages":[],"status":null,"vars":{}}"#.to_string(),
+                status,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_unknown_run_is_404() {
+        let app = router(test_state().await);
+        let uri = format!("/api/runs/{}/resume", Uuid::new_v4());
+        let resp = app
+            .oneshot(Request::post(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resume_completed_run_is_conflict() {
+        let state = test_state().await;
+        let store = state.store.clone();
+        let app = router(state);
+        let id = Uuid::new_v4();
+        put_checkpoint(&store, id, "whatever", boitata_store::RunState::Completed).await;
+
+        let uri = format!("/api/runs/{id}/resume");
+        let resp = app
+            .oneshot(Request::post(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn resume_unknown_blueprint_is_bad_request() {
+        // Catalog is empty, so a resumable checkpoint naming `ghost` can't reload.
+        let state = test_state().await;
+        let store = state.store.clone();
+        let app = router(state);
+        let id = Uuid::new_v4();
+        put_checkpoint(&store, id, "ghost", boitata_store::RunState::Suspended).await;
+
+        let uri = format!("/api/runs/{id}/resume");
+        let resp = app
+            .oneshot(Request::post(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_runs_includes_suspended_checkpoints() {
+        let state = test_state().await;
+        let store = state.store.clone();
+        let app = router(state);
+        let id = Uuid::new_v4();
+        put_checkpoint(&store, id, "fix_test", boitata_store::RunState::Suspended).await;
+
+        let resp = app
+            .oneshot(Request::get("/api/runs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["status"]["state"], "suspended");
+        assert_eq!(arr[0]["id"], id.to_string());
     }
 
     #[tokio::test]

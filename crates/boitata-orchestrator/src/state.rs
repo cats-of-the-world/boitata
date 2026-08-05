@@ -5,24 +5,31 @@
 // write through that channel's reducer (see [`State::apply`]). This mirrors
 // LangGraph's isolated-state model.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Outcome of the most recently executed node, used for conditional routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     Ok,
     Failed,
 }
 
 /// One entry in the running transcript: which node produced it and the text.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptEntry {
     pub node: String,
     pub text: String,
 }
 
 /// The shared state of a blueprint run.
-#[derive(Debug, Clone)]
+///
+/// `Serialize`/`Deserialize` let the executor persist a run's state to a
+/// [`Checkpointer`](crate::Checkpointer) between super-steps and restore it to
+/// resume — so a cancelled or crashed run picks up from the last super-step
+/// instead of starting over.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
     /// The original task. Set once at construction; nodes never change it.
     pub task: String,

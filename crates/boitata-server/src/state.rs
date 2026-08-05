@@ -15,6 +15,7 @@ use boitata_core::config::Config;
 use boitata_core::provider::Provider;
 use boitata_core::tools::{ToolPolicy, ToolRegistry};
 use boitata_orchestrator::{State as BlueprintState, Status as BlueprintStatus};
+use boitata_store::Store;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -38,6 +39,10 @@ pub struct AppState {
     /// Only these vetted names are accepted over the network — never an arbitrary
     /// path — so a run request can't read a file outside this set.
     pub blueprints: Arc<BTreeMap<String, PathBuf>>,
+    /// Durable state database. Blueprint runs are checkpointed here so an
+    /// interrupted run can be resumed (`POST /api/runs/{id}/resume`), including
+    /// after a server restart when it's no longer in the in-memory registry.
+    pub store: Store,
 }
 
 impl AppState {
@@ -47,6 +52,7 @@ impl AppState {
         tools: ToolRegistry,
         policy: ToolPolicy,
         blueprints: BTreeMap<String, PathBuf>,
+        store: Store,
     ) -> Self {
         Self {
             config: Arc::new(config),
@@ -55,6 +61,7 @@ impl AppState {
             policy: Arc::new(policy),
             runs: Arc::new(RwLock::new(HashMap::new())),
             blueprints: Arc::new(blueprints),
+            store,
         }
     }
 
@@ -94,6 +101,10 @@ pub enum RunStatus {
     Succeeded,
     Failed { error: Option<String> },
     Cancelled,
+    /// Interrupted (cancelled or crashed) but has a persisted checkpoint, so it
+    /// can be resumed via `POST /api/runs/{id}/resume`. Used for runs surfaced
+    /// from the state database that are no longer in the in-memory registry.
+    Suspended,
 }
 
 /// A single run's shared handle. Fields behind locks are written by the run's

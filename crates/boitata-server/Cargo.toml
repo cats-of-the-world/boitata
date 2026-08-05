@@ -13,6 +13,7 @@ path = "src/main.rs"
 boitata-core = { workspace = true }
 boitata-agent = { workspace = true }
 boitata-orchestrator = { workspace = true }
+boitata-store = { workspace = true }
 
 axum = { workspace = true }
 tokio = { workspace = true }

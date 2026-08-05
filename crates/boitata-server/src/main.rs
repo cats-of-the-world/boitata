@@ -78,7 +78,17 @@ async fn main() -> anyhow::Result<()> {
         None => Default::default(),
     };
 
-    let state = AppState::new(config, provider, tools, policy, blueprints);
+    // Durable state DB (default `boitata.db`), for blueprint run checkpoints so
+    // interrupted runs can be resumed. Opened once and shared across runs.
+    let db_path = config
+        .state_db
+        .clone()
+        .unwrap_or_else(|| "boitata.db".to_string());
+    let store = boitata_store::Store::open(&db_path)
+        .with_context(|| format!("failed to open state database `{db_path}`"))?;
+    info!("State database: {db_path}");
+
+    let state = AppState::new(config, provider, tools, policy, blueprints, store);
     let app = api::router(state);
 
     let listener = tokio::net::TcpListener::bind(&args.addr)
