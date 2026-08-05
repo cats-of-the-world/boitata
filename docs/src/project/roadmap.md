@@ -46,7 +46,11 @@ Where Boitata is headed. Checked items are done.
 - [x] `boitata-agent` as an Agent Client Protocol (ACP) server + client
       (`boitata-acp`)
 - [x] `agent_sandbox` node — run the agent **inside** a sandbox over ACP
-- [ ] Firecracker microVM `Sandbox` backend (ACP over vsock) + a rootfs image
+- [x] Firecracker microVM `Sandbox` backend — boots a VM per sandbox, runs
+      commands over SSH on a private TAP link, and reaches the in-VM agent over
+      TCP/ACP (`sandbox = "firecracker"`); needs `/dev/kvm` + `CAP_NET_ADMIN`
+- [ ] A rootfs image recipe (sshd + injected-key boot hook + toolchain +
+      `boitata-agent`) and a pinned guest kernel
 - [ ] End-to-end: a task spins up a VM with the code, its deps, and an agent that
       edits / compiles / tests inside it
 

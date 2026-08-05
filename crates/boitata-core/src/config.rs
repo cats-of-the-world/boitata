@@ -97,6 +97,58 @@ pub struct Config {
     /// `--blueprint`; defaults to no retries.
     #[serde(default)]
     pub blueprint_max_retries: Option<usize>,
+    /// Which sandbox backend the `provision`/`checkout`/`exec`/`agent_sandbox`
+    /// nodes use: `docker` (default) or `firecracker`. Firecracker gives VM-grade
+    /// isolation but requires `/dev/kvm`, `CAP_NET_ADMIN`, and a kernel + rootfs
+    /// (see the `[firecracker]` section).
+    #[serde(default)]
+    pub sandbox: Option<String>,
+    /// Firecracker backend settings, used when `sandbox = "firecracker"`.
+    #[serde(default)]
+    pub firecracker: Option<FirecrackerConfig>,
+}
+
+/// Settings for the Firecracker microVM sandbox backend. The `kernel` and
+/// `rootfs` paths point at a bootable `vmlinux` and an ext4 root image carrying
+/// `sshd`, the injected-key boot hook, and `boitata-agent`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FirecrackerConfig {
+    /// Path to the guest kernel image (`vmlinux`).
+    pub kernel: String,
+    /// Path to the base ext4 root filesystem (copied per VM, so the base is never
+    /// mutated).
+    pub rootfs: String,
+    /// User to SSH into the guest as. Defaults to `root`.
+    #[serde(default = "default_ssh_user")]
+    pub ssh_user: String,
+    /// vCPUs per microVM. Defaults to 2.
+    #[serde(default = "default_vcpus")]
+    pub vcpus: u32,
+    /// Memory per microVM, in MiB. Defaults to 1024.
+    #[serde(default = "default_mem_mib")]
+    pub mem_mib: u32,
+    /// Host network interface the guest's traffic is NAT'd out of (e.g. `eth0`).
+    pub egress_iface: String,
+    /// The `firecracker` binary to launch. Defaults to `firecracker` on `PATH`.
+    #[serde(default = "default_firecracker_bin")]
+    pub firecracker_bin: String,
+    /// Base directory for per-VM working files (API socket, rootfs overlay, keys).
+    /// Defaults to a temp directory.
+    #[serde(default)]
+    pub work_dir: Option<String>,
+}
+
+fn default_ssh_user() -> String {
+    "root".to_string()
+}
+fn default_vcpus() -> u32 {
+    2
+}
+fn default_mem_mib() -> u32 {
+    1024
+}
+fn default_firecracker_bin() -> String {
+    "firecracker".to_string()
 }
 
 /// A single MCP server. The transport is inferred from which field is set:
@@ -393,6 +445,8 @@ mod tests {
             auto_compact_threshold: None,
             blueprint_max_steps: None,
             blueprint_max_retries: None,
+            sandbox: None,
+            firecracker: None,
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("super-secret-key"), "{rendered}");

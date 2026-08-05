@@ -12,15 +12,11 @@ use futures::StreamExt;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
-use super::Sandbox;
+use super::{MAX_EXEC_OUTPUT, Sandbox, append_capped};
 
 /// Give up on an image pull that stalls this long, so a slow registry or a
 /// hung connection can't keep a provision future alive forever.
 const PULL_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// Cap on captured exec output. A verbose command shouldn't be able to OOM the
-/// orchestrator; output past this is dropped with a trailing marker.
-const MAX_EXEC_OUTPUT: usize = 1 << 20; // 1 MiB
 
 /// A [`Sandbox`] backed by local Docker containers.
 #[derive(Default)]
@@ -237,54 +233,3 @@ impl Sandbox for DockerSandbox {
     }
 }
 
-/// Append `chunk` to `output` without exceeding [`MAX_EXEC_OUTPUT`], truncating
-/// the appended slice to the remaining budget on a UTF-8 char boundary so a
-/// single large chunk can't overshoot the cap. Sets `truncated` when it clips.
-fn append_capped(output: &mut String, chunk: &str, truncated: &mut bool) {
-    let remaining = MAX_EXEC_OUTPUT.saturating_sub(output.len());
-    if remaining == 0 {
-        *truncated = !chunk.is_empty();
-        return;
-    }
-    if chunk.len() <= remaining {
-        output.push_str(chunk);
-    } else {
-        let mut end = remaining;
-        while end > 0 && !chunk.is_char_boundary(end) {
-            end -= 1;
-        }
-        output.push_str(&chunk[..end]);
-        *truncated = true;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn append_capped_bounds_output_on_char_boundary() {
-        let mut out = String::new();
-        let mut truncated = false;
-        // A chunk far larger than the cap is clipped to exactly the budget.
-        let big = "x".repeat(MAX_EXEC_OUTPUT + 100);
-        append_capped(&mut out, &big, &mut truncated);
-        assert_eq!(out.len(), MAX_EXEC_OUTPUT);
-        assert!(truncated);
-
-        // Once full, further chunks are dropped, not appended.
-        append_capped(&mut out, "more", &mut truncated);
-        assert_eq!(out.len(), MAX_EXEC_OUTPUT);
-    }
-
-    #[test]
-    fn append_capped_respects_utf8_boundaries() {
-        // Budget lands mid multi-byte char; the append backs off to a boundary.
-        let mut out = "a".repeat(MAX_EXEC_OUTPUT - 1);
-        let mut truncated = false;
-        append_capped(&mut out, "€", &mut truncated); // 3 bytes, only 1 byte left
-        assert_eq!(out.len(), MAX_EXEC_OUTPUT - 1); // nothing partial appended
-        assert!(truncated);
-        assert!(out.is_char_boundary(out.len()));
-    }
-}

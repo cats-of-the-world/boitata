@@ -231,6 +231,10 @@ async fn run_blueprint(
         .with_env_defaults(boitata_core::runtime::provider_env(cfg))
         .with_audit(sink as Arc<dyn AuditSink>)
         .with_max_retries(cfg.blueprint_max_retries);
+    // Override the default Docker sandbox backend if configured (e.g. Firecracker).
+    if let Some(backend) = boitata_orchestrator::build_sandbox(cfg)? {
+        executor = executor.with_sandbox(backend);
+    }
     if let Some(max_steps) = cfg.blueprint_max_steps {
         executor = executor.with_max_steps(max_steps);
     }
