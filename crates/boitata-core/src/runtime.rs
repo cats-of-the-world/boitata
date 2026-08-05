@@ -60,6 +60,24 @@ pub fn build_provider(config: &Config) -> anyhow::Result<Arc<dyn Provider>> {
     Ok(provider)
 }
 
+/// The provider configuration as a map of `BOITATA_*` environment variables,
+/// resolved from the environment or the config file. Handed to the blueprint
+/// executor so a `provision` node can forward the host's effective config into a
+/// sandbox — an in-container agent then inherits it without every value being
+/// exported. **Includes the API key (a secret); never log this map.**
+pub fn provider_env(config: &Config) -> std::collections::HashMap<String, String> {
+    let mut env = std::collections::HashMap::new();
+    env.insert("BOITATA_PROVIDER".to_string(), config.resolve_provider());
+    env.insert("BOITATA_MODEL".to_string(), config.resolve_model());
+    if let Some(base_url) = config.resolve_base_url() {
+        env.insert("BOITATA_BASE_URL".to_string(), base_url);
+    }
+    if let Some(key) = config.resolve_api_key() {
+        env.insert("BOITATA_API_KEY".to_string(), key);
+    }
+    env
+}
+
 /// Confine the path-taking tools to a workspace root. Secure by default:
 /// confinement is on unless `confine_tools = false`, and the root defaults to the
 /// current working directory when `workspace_root` is unset. Process-global —

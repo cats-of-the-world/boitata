@@ -9,6 +9,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -33,6 +34,11 @@ pub struct NodeCtx<'a> {
     /// Per-run sandbox manager for the provisioning nodes; tears down every
     /// sandbox the run provisioned when it ends.
     pub sandbox: Arc<Sandboxes>,
+    /// Fallback values (keyed by env var name) a `provision` node forwards into a
+    /// sandbox when the name isn't set in the process environment — the host's
+    /// resolved config (provider/model/base_url/key), so a container inherits it
+    /// without every value being exported. May hold secrets; never logged.
+    pub env_defaults: Arc<HashMap<String, String>>,
     pub cancel: CancellationToken,
 }
 
@@ -51,6 +57,7 @@ impl<'a> NodeCtx<'a> {
             compact_threshold: self.compact_threshold,
             human: self.human.clone(),
             sandbox: self.sandbox.clone(),
+            env_defaults: self.env_defaults.clone(),
             cancel,
         }
     }
