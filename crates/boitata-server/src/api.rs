@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs/{id}/cancel", post(cancel_run))
         .route("/api/blueprints", get(list_blueprints))
         .route("/api/blueprints/{name}", get(get_blueprint))
+        .route("/api/blueprints/{name}/source", get(get_blueprint_source))
         .with_state(state)
         .fallback(crate::assets::static_handler)
 }
@@ -302,6 +303,31 @@ async fn get_blueprint(
     let graph = boitata_orchestrator::describe(&src)
         .map_err(|e| ApiError::internal(format!("blueprint `{name}` is invalid: {e:#}")))?;
     Ok(Json(graph))
+}
+
+/// `GET /api/blueprints/{name}/source` — the blueprint's raw definition (the YAML
+/// file as written), so the UI can show the exact source behind the rendered
+/// graph. Only configured names resolve; the file is re-read so an edit shows up
+/// without a restart.
+async fn get_blueprint_source(
+    State(app): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<BlueprintSource>, ApiError> {
+    let path = app
+        .blueprints
+        .get(&name)
+        .ok_or_else(|| ApiError::not_found_msg(format!("unknown blueprint `{name}`")))?;
+    let source = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to read blueprint `{name}`: {e}")))?;
+    Ok(Json(BlueprintSource { name, source }))
+}
+
+/// The raw definition of a blueprint, returned by `get_blueprint_source`.
+#[derive(Serialize)]
+struct BlueprintSource {
+    name: String,
+    source: String,
 }
 
 /// `GET /api/runs/{id}/events` — Server-Sent Events. Replays the history buffer,
@@ -602,6 +628,41 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::get("/api/blueprints/nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_blueprint_source_returns_raw_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = "name: tidy\nentry: a\nnodes:\n  a: {type: tool, tool: cargo_fmt}\n";
+        std::fs::write(dir.path().join("tidy.yaml"), yaml).unwrap();
+        let catalog = boitata_orchestrator::discover(dir.path()).unwrap();
+        let app = router(state_with_blueprints(catalog).await);
+
+        // A known blueprint returns its raw YAML source verbatim.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/api/blueprints/tidy/source")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["name"], "tidy");
+        assert_eq!(body["source"], yaml);
+
+        // An unknown blueprint is a 404.
+        let resp = app
+            .oneshot(
+                Request::get("/api/blueprints/nope/source")
                     .body(Body::empty())
                     .unwrap(),
             )
