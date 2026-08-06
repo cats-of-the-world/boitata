@@ -34,6 +34,14 @@ The backend builds and runs without Node. If the UI hasn't been built, the API
 still works and the root serves a build hint. For UI development with hot-reload,
 run `npm run dev` in `frontend/` (it proxies `/api` to `:8787`).
 
+## Screenshots
+
+![Dashboard — run form and run list](../screenshots/dashboard.png)
+
+![Run view — collapsible step groups with live events](../screenshots/run-view.png)
+
+![Blueprint graph — deterministic and probabilistic steps](../screenshots/blueprint-graph.png)
+
 ## HTTP API
 
 | Method | Path | Purpose |

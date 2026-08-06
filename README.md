@@ -59,6 +59,14 @@ mdbook serve docs/      # live preview at http://localhost:3000
 - MCP: connect any [Model Context Protocol](https://modelcontextprotocol.io)
   server.
 
+## Screenshots
+
+![Dashboard — run form and run list](docs/src/screenshots/dashboard.png)
+
+![Run view — collapsible step groups with live events](docs/src/screenshots/run-view.png)
+
+![Blueprint graph — deterministic and probabilistic steps](docs/src/screenshots/blueprint-graph.png)
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).
