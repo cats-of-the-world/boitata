@@ -1,8 +1,8 @@
 # Installation
 
 Boitata is a Rust workspace. Building it needs the Rust toolchain plus two
-external tools: `ripgrep` (backs the `search` tool) and `git` (backs the
-`git_*` tools).
+external tools: `ripgrep` (backs the `search` tool) and `git` (backs the `git_*`
+tools).
 
 ## Prerequisites
 
@@ -38,7 +38,7 @@ cargo build --release
 
 The binary lands at `./target/release/boitata`.
 
-There is no published binary or crate yet — build from source for now.
+There is no published binary or crate yet, so build from source for now.
 
 ## Verify the install
 

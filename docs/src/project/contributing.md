@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome. Feel free to open a pull request.
 
 ## Development setup
 
@@ -18,8 +18,9 @@ CI runs all three on every pull request (pinned to the same toolchain via
 
 ## Editing this book
 
-The documentation lives in [`docs/`](https://github.com/cats-of-the-world/boitata/tree/master/docs)
-and is built with [mdBook](https://rust-lang.github.io/mdBook/):
+The documentation lives in
+[`docs/`](https://github.com/cats-of-the-world/boitata/tree/master/docs) and is
+built with [mdBook](https://rust-lang.github.io/mdBook/):
 
 ```bash
 cargo install mdbook      # if you don't have it
@@ -27,17 +28,18 @@ mdbook serve docs/        # live preview at http://localhost:3000
 mdbook build docs/        # render to docs/book/
 ```
 
-The table of contents is [`docs/src/SUMMARY.md`](https://github.com/cats-of-the-world/boitata/blob/master/docs/src/SUMMARY.md).
+The table of contents is
+[`docs/src/SUMMARY.md`](https://github.com/cats-of-the-world/boitata/blob/master/docs/src/SUMMARY.md).
 Add a chapter by creating a Markdown file and listing it there.
 
 ## Acknowledgments
 
-- **Stripe's Minions** — for the blueprint architecture and determinism-first
-  philosophy.
-- **Block's Goose** — for the modular Rust architecture and MCP integration
-  patterns.
+- Stripe's Minions, for the blueprint architecture and determinism-first
+  approach.
+- Block's Goose, for the modular Rust architecture and MCP integration patterns.
 
 ## License
 
-MIT License — see the [LICENSE](https://github.com/cats-of-the-world/boitata/blob/master/LICENSE)
-file for details.
+MIT License. See the
+[LICENSE](https://github.com/cats-of-the-world/boitata/blob/master/LICENSE) file
+for details.

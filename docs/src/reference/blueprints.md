@@ -1,11 +1,11 @@
 # Blueprints
 
-A **blueprint** stitches agent, tool, script, and human-approval steps into a
-typed graph — hybrid deterministic/agentic workflows with fan-out, retry, and
-verify loops. This is how Boitata automates multi-step workflows instead of a
-single free-form agent run.
+A blueprint stitches agent, tool, script, and human-approval steps into a typed
+graph: hybrid deterministic/agentic workflows with fan-out, retry, and verify
+loops. This is how Boitata automates multi-step workflows instead of a single
+free-form agent run.
 
-Blueprints are YAML files you provide. Point `--blueprint` at a path — either one
+Blueprints are YAML files you provide. Point `--blueprint` at a path, either one
 of the ready-to-copy examples under
 [`examples/blueprints/`](https://github.com/cats-of-the-world/boitata/tree/master/examples/blueprints)
 or your own file:
@@ -59,21 +59,21 @@ Every node is tagged by `type` (snake_case):
 | `tool` | `tool`, `args?` | Invoke a registered tool with arguments (defaults to `{}`) |
 | `script` | `run` | Run a shell script deterministically, routing on its exit code |
 | `human` | `prompt`, `mode?` | Pause for human input (human-in-the-loop); `mode` defaults to `input` |
-| `provision` | `image`, `env?` | Create an ephemeral sandbox from `image`; its output is the sandbox id, referenced downstream as `{name}`. `env` is a list of variable *names* to forward into the sandbox (see below) |
+| `provision` | `image`, `env?` | Create an ephemeral sandbox from `image`; its output is the sandbox id, referenced downstream as `{name}`. `env` is a list of variable names to forward into the sandbox (see below) |
 | `checkout` | `container`, `repo`, `ref?`, `path?` | `git clone` a repo into a sandbox (`path` defaults to `/workspace`) |
 | `exec` | `container`, `run`, `workdir?` | Run a shell command inside a sandbox, routing on its exit code |
-| `agent_sandbox` | `container`, `prompt`, `port?`, `command?` | Run the agent **inside** the sandbox over ACP, streaming its events into the run |
+| `agent_sandbox` | `container`, `prompt`, `port?`, `command?` | Run the agent inside the sandbox over ACP, streaming its events into the run |
 
-The last four move a run off the host into an isolated sandbox — see
+The last four move a run off the host into an isolated sandbox. See
 [Sandboxed Execution](../concepts/sandboxed-execution.md). A sandbox a run
 provisions is destroyed automatically when the run ends.
 
-**Forwarding secrets into a sandbox.** A `provision` node's `env` lists environment
-variable *names* (e.g. `env: [ANTHROPIC_API_KEY]`); their **values are read from
-the orchestrator's environment at run time** and injected into the container's
+Forwarding secrets into a sandbox: a `provision` node's `env` lists environment
+variable names (for example `env: [ANTHROPIC_API_KEY]`). Their values are read
+from the orchestrator's environment at run time and injected into the container's
 environment only. A value is never written in the blueprint, shown in the graph
-view (which displays the names), or logged — so set the named variables where you
-run boitata, and keep secrets out of the YAML.
+view (which displays the names), or logged. Set the named variables where you run
+boitata, and keep secrets out of the YAML.
 
 ### Prompts
 
@@ -85,11 +85,11 @@ command line.
 
 Edges out of a node are either:
 
-- a single unconditional `to`, **or**
+- a single unconditional `to`, or
 - a set of conditional edges each tagged `when: success | failure`.
 
-The loader folds the conditional set into one status router. `to: END` (any case)
-routes to the terminal sentinel — that path ends the run.
+The loader folds the conditional set into one status router. `to: END` (any
+case) routes to the terminal sentinel; that path ends the run.
 
 ```yaml
 edges:
@@ -97,21 +97,21 @@ edges:
   - {from: verify, when: success, to: END}   # finish on success
 ```
 
-Several edges sharing a `when` **fan out** (parallel super-steps); a status with
-no edge yields an empty set and that path ends.
+Several edges sharing a `when` fan out (parallel super-steps); a status with no
+edge yields an empty set and that path ends.
 
 ## Execution model
 
-- **Parallel super-steps.** Edges that fan out from one node run concurrently
+- Parallel super-steps. Edges that fan out from one node run concurrently
   (fan-out / fan-in).
-- **Checkpoint + retry.** A failing super-step can be retried, each attempt
+- Checkpoint and retry. A failing super-step can be retried, each attempt
   restoring the pre-step state from an in-memory checkpoint. Bounded by
   `blueprint_max_retries`.
-- **Step limit.** Cyclic graphs are bounded by `blueprint_max_steps`.
-- **Human-in-the-loop.** A `human` node with `mode: approval` prompts for a
-  yes/no; an affirmative reply routes onward, anything else ends the run.
-  Requires an interactive stdin — on a non-interactive run the approval node
-  errors rather than proceeding unattended.
+- Step limit. Cyclic graphs are bounded by `blueprint_max_steps`.
+- Human-in-the-loop. A `human` node with `mode: approval` prompts for a yes/no;
+  an affirmative reply routes onward, anything else ends the run. Requires an
+  interactive stdin; on a non-interactive run the approval node errors rather
+  than proceeding unattended.
 
 > Human-in-the-loop nodes are not yet supported over the
 > [web UI](../interfaces/server.md).
@@ -120,23 +120,23 @@ no edge yields an empty set and that path ends.
 
 Boitata ships ready-to-copy example blueprints in
 [`examples/blueprints/`](https://github.com/cats-of-the-world/boitata/tree/master/examples/blueprints).
-They are plain YAML files — not compiled into the binary — so copy one as a
+They are plain YAML files, not compiled into the binary, so copy one as a
 starting point and point `--blueprint` at your copy (or run it in place):
 
 | Blueprint | Shape |
 |-----------|-------|
-| `default` | `agent → cargo_fmt → cargo check`, looping back on a failed check |
-| `fix_lint_errors` | `agent → cargo_fmt → clippy (-D warnings)`, looping until clean |
-| `fix_test_failure` | `agent → cargo test`, looping until the suite passes |
-| `setup_devbox` | `script (devbox init && install) → agent` |
-| `human_approval` | `human (approval) → agent`, ending on a negative reply |
-| `containerized_task` | `provision → checkout → agent (in-container) → cargo test`, the agent fixing failures until they pass |
+| `default` | `agent -> cargo_fmt -> cargo check`, looping back on a failed check |
+| `fix_lint_errors` | `agent -> cargo_fmt -> clippy (-D warnings)`, looping until clean |
+| `fix_test_failure` | `agent -> cargo test`, looping until the suite passes |
+| `setup_devbox` | `script (devbox init && install) -> agent` |
+| `human_approval` | `human (approval) -> agent`, ending on a negative reply |
+| `containerized_task` | `provision -> checkout -> agent (in-container) -> cargo test`, the agent fixing failures until they pass |
 
 ## Writing your own
 
 Drop a `.yaml` file and point `--blueprint` at its path. A common pattern is the
-*verify loop*: an `agent` node does the work, a deterministic `script` node
-checks it, and a `failure` edge routes back to the agent:
+verify loop: an `agent` node does the work, a deterministic `script` node checks
+it, and a `failure` edge routes back to the agent:
 
 ```yaml
 name: fmt_then_verify
@@ -161,10 +161,10 @@ edges:
 
 ## On the server
 
-The [web UI / server](../interfaces/server.md) runs blueprints too, but **by
-name** rather than by path: start it with `--blueprints-dir <dir>` and it offers
-every `.yaml` in that directory (by file stem) in the run form and at
-`GET /api/blueprints`. Only those vetted names are accepted — the server never
+The [web UI / server](../interfaces/server.md) runs blueprints too, but by name
+rather than by path: start it with `--blueprints-dir <dir>` and it offers every
+`.yaml` in that directory (by file stem) in the run form and at
+`GET /api/blueprints`. Only those vetted names are accepted; the server never
 reads an arbitrary path from a network request. Point it at `examples/blueprints`,
 or your own directory:
 

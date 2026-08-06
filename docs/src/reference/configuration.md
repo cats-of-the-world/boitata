@@ -20,8 +20,8 @@ cp boitata.example.toml boitata.toml
 
 ## Secrets
 
-Prefer environment variables for real secrets — they take precedence over the
-file and keep credentials out of disk:
+Prefer environment variables for real secrets. They take precedence over the
+file and keep credentials off disk:
 
 ```bash
 export BOITATA_API_KEY="your-key"
@@ -42,9 +42,9 @@ export BOITATA_API_KEY="your-key"
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider` | string | — | `"anthropic"`, `"openai"`, or `"ollama"` |
-| `model` | string | — | Model identifier (e.g. `"glm-4.6"`) |
-| `api_key` | string? | — | API key. Prefer `BOITATA_API_KEY` |
+| `provider` | string | none | `"anthropic"`, `"openai"`, or `"ollama"` |
+| `model` | string | none | Model identifier (e.g. `"glm-4.6"`) |
+| `api_key` | string? | none | API key. Prefer `BOITATA_API_KEY` |
 | `base_url` | string? | provider default | Override the provider's endpoint |
 | `max_tokens` | usize? | conservative | Output token budget per request |
 | `max_iterations` | usize? | 50 | Maximum agent iterations before giving up |
@@ -64,12 +64,12 @@ See [Audit Log](./audit-log.md) for what gets written.
 |-------|------|---------|-------------|
 | `auto_compact_threshold` | float? | `0.8` | Fraction of the context window at which older turns are summarized. `0.0` disables compaction |
 
-### Tools & security
+### Tools and security
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `allow_execute_command` | bool? | `true` | Register the arbitrary `execute_command` tool |
-| `workspace_root` | string? | current dir | Root path-taking tools are confined to |
+| `workspace_root` | string? | current dir | Root that path-taking tools are confined to |
 | `confine_tools` | bool? | `true` | Confine path-taking tools to `workspace_root` |
 | `tool_policy` | string? | `"allow_all"` | `"allow_all"` or `"read_only"` |
 | `denied_commands` | [string]? | `[]` | Regexes; a matching `execute_command` is denied |
@@ -84,15 +84,15 @@ startup and exposed to the agent. See [MCP Servers](./mcp.md).
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Namespacing identifier (e.g. `"git"`) |
-| `command` | string? | Executable to spawn (→ **stdio** transport) |
+| `command` | string? | Executable to spawn (selects the stdio transport) |
 | `args` | [string] | Arguments for `command` |
 | `env` | map | Extra env vars for the server process |
-| `url` | string? | Remote endpoint (→ **Streamable HTTP**) |
+| `url` | string? | Remote endpoint (selects the Streamable HTTP transport) |
 | `auth_token` | string? | Bearer token for HTTP |
 | `headers` | map | Extra HTTP headers |
 
-> Set exactly one of `command` or `url` per server. Setting both — or neither —
-> is a config error that aborts the run.
+> Set exactly one of `command` or `url` per server. Setting both, or neither, is
+> a config error that aborts the run.
 
 ### Blueprints
 

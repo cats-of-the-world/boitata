@@ -49,7 +49,7 @@ export BOITATA_API_KEY="your-z.ai-key"
 
 ## Local models with Ollama
 
-No API key required — just point at a running Ollama instance:
+No API key required; just point at a running Ollama instance:
 
 ```toml
 provider = "ollama"
@@ -59,7 +59,7 @@ base_url = "http://localhost:11434"
 
 ## API key precedence
 
-For any provider, leave `api_key` blank in the file and export it instead — the
+For any provider, leave `api_key` blank in the file and export it instead. The
 `BOITATA_API_KEY` env var takes precedence over the config file:
 
 ```bash

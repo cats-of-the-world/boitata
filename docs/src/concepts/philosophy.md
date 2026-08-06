@@ -1,6 +1,6 @@
 # Determinism First
 
-A core principle of Boitata is to **use deterministic tools whenever possible**
+A core principle of Boitata is to use deterministic tools whenever possible
 instead of asking the LLM to do everything.
 
 ## Why
@@ -9,10 +9,9 @@ Asking a language model to hand-edit code that a formatter, linter, or test
 runner can already handle is slow, expensive, and unreliable. A deterministic
 tool:
 
-- **Reduces token costs** — it runs without an LLM round-trip.
-- **Improves reliability** — deterministic operations have predictable outcomes.
-- **Enables faster iteration** — quick feedback loops without API calls.
-- **Maintains consistency** — the same inputs always produce the same outputs.
+- Reduces token cost. It runs without an LLM round-trip.
+- Improves reliability. The same inputs always produce the same outputs.
+- Enables faster iteration. Quick feedback loops without API calls.
 
 ## What gets offloaded
 
@@ -26,18 +25,19 @@ tool:
 
 ## What the LLM still does
 
-Boitata's tool layer prioritizes these deterministic operations, using the LLM
+Boitata's tool layer prefers these deterministic operations and uses the LLM
 only for what genuinely needs judgment:
 
-- **Planning** — deciding which tools to use and in what order.
-- **Interpretation** — understanding tool results and deciding what to do next.
-- **Complex changes** — non-routine code modifications that lack a deterministic
+- Planning: deciding which tools to use and in what order.
+- Interpretation: understanding tool results and deciding what to do next.
+- Complex changes: non-routine code modifications that lack a deterministic
   tool.
 
-This division is what lets Boitata run *unattended*: the boring, mechanical,
+This division is what lets Boitata run unattended. The boring, mechanical,
 error-prone steps are pinned to deterministic tools, and the LLM spends its
 budget on the parts that actually need it.
 
-This philosophy also shapes the [Blueprint](../reference/blueprints.md) system,
-where a deterministic `script` node (e.g. `cargo test`) can gate an `agent` node
-in a retry loop — the agent only re-runs when the deterministic check fails.
+This principle also shapes the [Blueprint](../reference/blueprints.md) system,
+where a deterministic `script` node (for example `cargo test`) can gate an
+`agent` node in a retry loop. The agent only re-runs when the deterministic
+check fails.

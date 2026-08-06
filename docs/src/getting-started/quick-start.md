@@ -23,11 +23,12 @@ base_url = "https://api.z.ai/api/paas/v4/chat/completions"
 max_tokens = 4096
 ```
 
-Every field is documented in the [Configuration reference](../reference/configuration.md).
+Every field is documented in the
+[Configuration reference](../reference/configuration.md).
 
 ## 2. Provide an API key
 
-For real secrets, leave `api_key` blank in the file and export it instead — the
+For real secrets, leave `api_key` blank in the file and export it instead. The
 environment variable takes precedence over the file:
 
 ```bash
@@ -49,8 +50,8 @@ prints the tool calls it made and a final summary.
 
 ## 4. Read the audit log
 
-Every run appends structured events to `boitata-audit.log`. Pretty-print the
-latest run with `jq`:
+Every run appends structured events to `boitata-audit.log`. Print the log with
+`jq`:
 
 ```bash
 jq -c . boitata-audit.log
@@ -60,11 +61,11 @@ See [Audit Log](../reference/audit-log.md) for the full event schema.
 
 ## Where to go next
 
-- **Pick a provider** — see [Providers](../reference/providers.md) for Anthropic,
+- Pick a provider. See [Providers](../reference/providers.md) for Anthropic,
   OpenAI-compatible, and local Ollama setups.
-- **Lock it down** — [Security](../reference/security.md) covers the tool
-  permission policy and path confinement.
-- **Automate a workflow** — [Blueprints](../reference/blueprints.md) stitch
-  agent, tool, and script steps into retryable graphs.
-- **Run it as a service** — the [Server & Web UI](../interfaces/server.md) page
-  covers the HTTP/SSE backend.
+- Lock it down. [Security](../reference/security.md) covers the tool permission
+  policy and path confinement.
+- Automate a workflow. [Blueprints](../reference/blueprints.md) stitch agent,
+  tool, and script steps into retryable graphs.
+- Run it as a service. The [Server & Web UI](../interfaces/server.md) page covers
+  the HTTP/SSE backend.
