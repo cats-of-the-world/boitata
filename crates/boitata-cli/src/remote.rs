@@ -4,11 +4,11 @@
 //! the final result, and cancels the run on Ctrl-C.
 
 use anyhow::{Context, bail};
-use std::time::Duration;
-use uuid::Uuid;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{Value, json};
+use std::time::Duration;
+use uuid::Uuid;
 
 pub async fn run(
     base_url: &str,
@@ -120,10 +120,7 @@ pub async fn run(
 
 /// Attach the bearer token to a request when one is configured (no-op when the
 /// server runs without auth). Mirrors `boitata-server`'s `require_token` gate.
-fn auth(
-    req: reqwest::RequestBuilder,
-    token: &Option<String>,
-) -> reqwest::RequestBuilder {
+fn auth(req: reqwest::RequestBuilder, token: &Option<String>) -> reqwest::RequestBuilder {
     match token {
         Some(t) => req.header("authorization", format!("Bearer {t}")),
         None => req,

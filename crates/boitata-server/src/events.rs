@@ -6,8 +6,8 @@
 //! SSE subscribers. Auditing is best-effort, so a full channel or absent
 //! subscribers never fails a run.
 
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use boitata_core::audit::{AuditEvent, AuditSink};

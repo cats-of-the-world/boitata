@@ -6,9 +6,9 @@
 //! [`RunResult`]. Restarting the server forgets past runs; persistence is a later
 //! step.
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use parking_lot::RwLock;
 use std::sync::Arc;
 
 use boitata_agent::TaskResult;
@@ -105,7 +105,7 @@ impl AppState {
 /// Insert a run and, once the registry exceeds [`MAX_RUNS`], evict the oldest
 /// *finished* runs so a long-lived server's memory stays bounded. In-flight runs
 /// are never evicted. Shared by [`AppState::register_run`] (unconditional) and
- /// [`AppState::try_register_run`] (conditional), so eviction stays consistent.
+/// [`AppState::try_register_run`] (conditional), so eviction stays consistent.
 fn insert_evicting(runs: &mut HashMap<Uuid, Arc<RunHandle>>, handle: Arc<RunHandle>) {
     runs.insert(handle.id, handle);
     if runs.len() > MAX_RUNS {

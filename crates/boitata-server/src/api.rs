@@ -1,16 +1,16 @@
 //! HTTP surface: REST for actions, SSE for live run events.
 
-use std::convert::Infallible;
 use parking_lot::Mutex;
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::middleware::{self, Next};
 use axum::routing::{get, post};
 use boitata_agent::{Agent, Task};
 use boitata_core::audit::AuditSink;
@@ -18,8 +18,8 @@ use boitata_orchestrator::{Executor, SqliteCheckpointer};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::broadcast;
 use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use uuid::Uuid;
@@ -168,7 +168,13 @@ async fn create_run(
     app.register_run(handle.clone());
     info!(%id, blueprint = ?req.blueprint, "run started");
 
-    tokio::spawn(run_job(app.clone(), handle, req.task, req.blueprint, permit));
+    tokio::spawn(run_job(
+        app.clone(),
+        handle,
+        req.task,
+        req.blueprint,
+        permit,
+    ));
 
     Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))))
 }
@@ -387,12 +393,7 @@ fn blueprint_executor(
 /// runs recovered from the state database (e.g. after a restart), the latter
 /// reported as `suspended`. In-memory entries take precedence for a given id.
 async fn list_runs(State(app): State<AppState>) -> Json<Vec<RunSummary>> {
-    let mut runs: Vec<RunSummary> = app
-        .runs
-        .read()
-        .values()
-        .map(|h| h.summary())
-        .collect();
+    let mut runs: Vec<RunSummary> = app.runs.read().values().map(|h| h.summary()).collect();
     let live: std::collections::HashSet<Uuid> = runs.iter().map(|r| r.id).collect();
 
     // Fold in resumable checkpoints not already represented by a live run.
