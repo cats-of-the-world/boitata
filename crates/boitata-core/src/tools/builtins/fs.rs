@@ -382,6 +382,7 @@ impl Tool for FileEditTool {
                 use std::io::Write;
                 let mut opts = fs::OpenOptions::new();
                 opts.write(true).create_new(true);
+                #[cfg(unix)]
                 {
                     use std::os::unix::fs::OpenOptionsExt;
                     opts.mode(0o600);

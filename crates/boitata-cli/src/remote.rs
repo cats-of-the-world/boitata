@@ -17,12 +17,18 @@ pub async fn run(
     api_token: Option<String>,
 ) -> anyhow::Result<()> {
     let base = base_url.trim_end_matches('/').to_string();
-    // Don't follow redirects and bound every request, so a malicious/compromised
-    // --remote server (or a MITM on an http:// URL) can't redirect the CLI at an
-    // arbitrary internal endpoint or stall it forever.
+    // Don't follow redirects, and bound connect + idle-read time (not *total*
+    // request time), so a malicious/compromised --remote server (or a MITM on an
+    // http:// URL) can't redirect the CLI at an arbitrary internal endpoint or
+    // stall it forever. A total `.timeout()` would be wrong here: the event
+    // stream is a long-lived SSE body that legitimately stays open for the whole
+    // run, and a total deadline would sever it (and abort the run tail) mid-way.
+    // `read_timeout` bounds per-read idle time instead — the server's SSE
+    // keep-alives reset it — so a genuinely stalled peer is still caught.
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(30))
         .build()
         .context("failed to build HTTP client")?;
 

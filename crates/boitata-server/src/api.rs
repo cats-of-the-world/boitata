@@ -28,7 +28,13 @@ use crate::events::ChannelAuditSink;
 use crate::state::{AppState, RunHandle, RunResult, RunStatus, RunSummary};
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    // Only the `/api` surface is gated by the token; it's the part that can drive
+    // the shell/file/git agent. The embedded web UI (the SPA shell and its hashed
+    // asset bundle) carries no secrets and must load in a plain browser — a
+    // navigation can't send an `Authorization` header — so serving it behind the
+    // gate would 401 the very UI that binding non-loopback exists to expose. The
+    // UI's own `/api` calls still require the token.
+    let api = Router::new()
         .route("/api/runs", post(create_run).get(list_runs))
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/events", get(run_events))
@@ -37,13 +43,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/blueprints", get(list_blueprints))
         .route("/api/blueprints/{name}", get(get_blueprint))
         .route("/api/blueprints/{name}/source", get(get_blueprint_source))
-        .fallback(crate::assets::static_handler)
         // Cap request bodies so a client can't OOM the server by streaming a
         // multi-GB JSON payload (axum 0.8 applies no default limit).
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        // When an API token is configured, every request must carry it — gating
-        // the shell/file/git agent behind a shared secret (see `require_token`).
-        .layer(middleware::from_fn_with_state(state.clone(), require_token))
+        // When an API token is configured, every `/api` request must carry it —
+        // gating the shell/file/git agent behind a shared secret (see
+        // `require_token`).
+        .layer(middleware::from_fn_with_state(state.clone(), require_token));
+
+    api.fallback(crate::assets::static_handler)
         .with_state(state)
 }
 
