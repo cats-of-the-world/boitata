@@ -210,6 +210,11 @@ button.cancel:hover { background: var(--panel-2); border-color: var(--muted); }
   border-radius: 8px;
   background: var(--bg-2);
   overflow: hidden;
+  /* Keep the group at its content height inside the scrolling `.log` column:
+     `overflow: hidden` zeroes the flex item's automatic minimum size, so without
+     `flex: none` the steps shrink to fit the 58vh cap and their bodies get
+     clipped with no scrollbar once a run produces several steps. */
+  flex: none;
 }
 .step-ok { border-left: 3px solid var(--ok); }
 .step-err { border-left: 3px solid var(--err); }
