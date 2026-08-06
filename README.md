@@ -1,6 +1,6 @@
 # Boitata
 
-> A fire serpent from Brazilian folklore that guards the forest.
+(to understand more the reasoning on the project read: https://www.elias.sh/posts/i-vibe-coded )
 
 Boitata is a one-shot, end-to-end coding agent written in Rust. It is inspired
 by Stripe's
