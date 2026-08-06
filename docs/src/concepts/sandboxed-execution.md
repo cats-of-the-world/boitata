@@ -112,8 +112,10 @@ current limits, tracked as follow-ups (see [Security](../reference/security.md))
 - The `provision` node does not yet apply resource limits or capability drops;
   vanilla containers share the host kernel. Firecracker or Kata microVMs are the
   planned answer for a strong trust boundary.
-- The server has no authentication. Put it behind a trusted network or an
-  authenticating proxy.
+- The server binds loopback by default and refuses a non-loopback bind unless
+  an API token is configured (`api_token` / `BOITATA_API_TOKEN`); every request
+  then requires it. Multi-tenant authentication and authorization (per-user
+  tokens, sandbox tenancy) are still first-class next steps.
 - Provider credentials inside a sandbox are the sandbox's; don't hand a tenant a
   shared key.
 

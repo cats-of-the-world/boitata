@@ -6,7 +6,7 @@
 
 use super::{
     Chunk, CompletionRequest, CompletionResponse, Message, MessageContent, MessageRole, Provider,
-    ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage, tool_content_text,
+    ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage, http_client, tool_content_text,
 };
 use async_trait::async_trait;
 use reqwest::Client;
@@ -31,7 +31,7 @@ impl OllamaProvider {
     /// Create with custom base URL
     pub fn with_config(model: String, base_url: Option<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             model,
             max_tokens: 128_000,
             base_url: base_url.unwrap_or_else(|| "http://localhost:11434".to_string()),

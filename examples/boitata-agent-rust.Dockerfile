@@ -14,7 +14,7 @@
 # own, or set $BOITATA_CONFIG) and supply the provider's API key to do real work.
 
 # --- Stage 1: build the agent binary against the pinned toolchain ---
-FROM rust:latest AS build
+FROM rust:1.96.0 AS build
 WORKDIR /src
 # Copy only what the build needs (not target/, examples/, docs/) for a small,
 # cache-friendly context.
@@ -23,11 +23,21 @@ COPY crates ./crates
 RUN cargo build --release -p boitata-agent
 
 # --- Stage 2: runtime image with the toolchain, git, and the agent ---
-FROM rust:latest
+FROM rust:1.96.0
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/boitata-agent /usr/local/bin/boitata-agent
+
+# Run as a non-root user. The agent executes shell/file/git (and `cargo`)
+# commands on a cloned repo; a non-root identity shrinks the blast radius of any
+# container escape and avoids accidentally writing root-owned files into the
+# workspace that a later `ExecNode` step couldn't then modify.
+RUN useradd --create-home --shell /bin/bash agent \
+    && mkdir -p /workspace \
+    && chown -R agent:agent /workspace
+WORKDIR /workspace
+USER agent
 
 # Default provider config (a z.ai OpenAI-compatible endpoint). No key is baked in.
 # Every field is overridable at run time by the matching env var the blueprint

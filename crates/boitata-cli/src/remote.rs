@@ -4,22 +4,38 @@
 //! the final result, and cancels the run on Ctrl-C.
 
 use anyhow::{Context, bail};
+use std::time::Duration;
+use uuid::Uuid;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{Value, json};
 
-/// Schedule `task` on the server at `base_url` and stream it to completion.
-pub async fn run(base_url: &str, task: String, blueprint: Option<String>) -> anyhow::Result<()> {
+pub async fn run(
+    base_url: &str,
+    task: String,
+    blueprint: Option<String>,
+    api_token: Option<String>,
+) -> anyhow::Result<()> {
     let base = base_url.trim_end_matches('/').to_string();
-    let client = reqwest::Client::new();
+    // Don't follow redirects and bound every request, so a malicious/compromised
+    // --remote server (or a MITM on an http:// URL) can't redirect the CLI at an
+    // arbitrary internal endpoint or stall it forever.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
 
     // Schedule the run.
-    let resp = client
-        .post(format!("{base}/api/runs"))
-        .json(&json!({ "task": task, "blueprint": blueprint }))
-        .send()
-        .await
-        .with_context(|| format!("failed to reach boitata-server at {base}"))?;
+    let resp = auth(
+        client
+            .post(format!("{base}/api/runs"))
+            .json(&json!({ "task": task, "blueprint": blueprint })),
+        &api_token,
+    )
+    .send()
+    .await
+    .with_context(|| format!("failed to reach boitata-server at {base}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let msg = resp
@@ -34,30 +50,39 @@ pub async fn run(base_url: &str, task: String, blueprint: Option<String>) -> any
         .as_str()
         .map(String::from)
         .context("server response missing run id")?;
+    // The server controls this value; validate it's a UUID before splicing it
+    // into request paths, so a hostile server can't redirect follow-up requests
+    // to other endpoints (e.g. an id of "../blueprints").
+    Uuid::parse_str(&id).context("server returned a malformed run id")?;
     println!("Scheduled run {id} on {base}");
 
     // Cancel the run if the user interrupts. Aborted once the run ends so it
     // doesn't linger.
     let canceller = {
-        let (base, id, client) = (base.clone(), id.clone(), client.clone());
+        let (base, id, client, api_token) =
+            (base.clone(), id.clone(), client.clone(), api_token.clone());
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
                 eprintln!("\nInterrupt received; cancelling run…");
-                let _ = client
-                    .post(format!("{base}/api/runs/{id}/cancel"))
-                    .send()
-                    .await;
+                let _ = auth(
+                    client.post(format!("{base}/api/runs/{id}/cancel")),
+                    &api_token,
+                )
+                .send()
+                .await;
             }
         })
     };
 
     // Tail the live event stream until a terminal event or the stream closes.
-    let resp = client
-        .get(format!("{base}/api/runs/{id}/events"))
-        .send()
-        .await
-        .context("failed to open event stream")?
-        .error_for_status()?;
+    let resp = auth(
+        client.get(format!("{base}/api/runs/{id}/events")),
+        &api_token,
+    )
+    .send()
+    .await
+    .context("failed to open event stream")?
+    .error_for_status()?;
     let mut events = resp.bytes_stream().eventsource();
     while let Some(item) = events.next().await {
         let event = item.context("event stream error")?;
@@ -73,8 +98,7 @@ pub async fn run(base_url: &str, task: String, blueprint: Option<String>) -> any
     canceller.abort();
 
     // Fetch and print the final result and derive an exit status.
-    let detail = client
-        .get(format!("{base}/api/runs/{id}"))
+    let detail = auth(client.get(format!("{base}/api/runs/{id}")), &api_token)
         .send()
         .await?
         .error_for_status()?
@@ -91,6 +115,18 @@ pub async fn run(base_url: &str, task: String, blueprint: Option<String>) -> any
                 .as_str()
                 .unwrap_or("run did not complete successfully")
         ),
+    }
+}
+
+/// Attach the bearer token to a request when one is configured (no-op when the
+/// server runs without auth). Mirrors `boitata-server`'s `require_token` gate.
+fn auth(
+    req: reqwest::RequestBuilder,
+    token: &Option<String>,
+) -> reqwest::RequestBuilder {
+    match token {
+        Some(t) => req.header("authorization", format!("Bearer {t}")),
+        None => req,
     }
 }
 

@@ -8,7 +8,7 @@
 
 use super::{
     Chunk, CompletionRequest, CompletionResponse, Message, MessageContent, MessageRole, Provider,
-    ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage, tool_content_text,
+    ProviderError, ProviderResult, ToolCall, ToolDefinition, Usage, http_client, tool_content_text,
 };
 use async_trait::async_trait;
 use reqwest::Client;
@@ -16,13 +16,23 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 
 /// OpenAI provider
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAIProvider {
     client: Client,
     api_key: String,
     model: String,
     max_tokens: usize,
     base_url: String,
+}
+
+impl std::fmt::Debug for OpenAIProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the API key (mirrors `Config`'s redaction discipline).
+        f.debug_struct("OpenAIProvider")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpenAIProvider {
@@ -34,7 +44,7 @@ impl OpenAIProvider {
     /// Create with custom base URL
     pub fn with_config(api_key: String, model: String, base_url: Option<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             api_key,
             model,
             max_tokens: 128_000,

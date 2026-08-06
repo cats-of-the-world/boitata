@@ -58,8 +58,15 @@ Credentials never leak through the machinery:
   or the secret leaks anywhere the config is logged or formatted.
 - `McpServerConfig` redacts `auth_token` and the values of `env`/`headers`,
   which routinely carry credentials.
-- The audit log never contains your API key.
+- The audit log never contains your API key, and the log file itself is created
+  owner-only (`0600` on Unix) because it records full tool arguments and
+  results, which routinely include secrets.
 - `boitata.toml` (which may hold secrets) is git-ignored by default.
+- HTTP API (`boitata-server`): loopback-only by default. Binding a non-loopback
+  address requires an API token (`api_token` / `BOITATA_API_TOKEN`), and every
+  request must then carry it (`Authorization: Bearer <token>`). Provider
+  requests never follow HTTP redirects, so credentials can't be forwarded to a
+  redirect target.
 
 ## Putting it together
 

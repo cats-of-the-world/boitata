@@ -103,7 +103,20 @@ async fn main() -> anyhow::Result<()> {
             blueprint,
             remote,
         } => match remote {
-            Some(url) => remote::run(&url, task, blueprint).await,
+            Some(url) => {
+                // Resolve a bearer token for the remote server from the local
+                // config (which checks BOITATA_API_TOKEN first) — but don't
+                // require a config file just to talk to a remote server, so fall
+                // back to the env var alone if there's no local config.
+                let token = match Config::load(&Config::resolve_path(config)) {
+                    Ok(cfg) => cfg.resolve_api_token(),
+                    Err(_) => std::env::var("BOITATA_API_TOKEN")
+                        .ok()
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty()),
+                };
+                remote::run(&url, task, blueprint, token).await
+            }
             None => run_task(task, config, blueprint).await,
         },
         Commands::Resume {
