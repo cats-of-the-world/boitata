@@ -173,7 +173,18 @@ impl FileAuditLog {
     /// Open (or create) the audit log at `path` in append mode, tagging every
     /// event with `run_id`.
     pub fn open(path: &Path, run_id: String) -> std::io::Result<Self> {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        // The log records full tool arguments and results (file contents,
+        // command output), which routinely include secrets, so create it
+        // owner-only — mirroring the command-output spill files in `exec.rs`.
+        // (On an existing log the mode is left as-is; a fresh file gets 0600.)
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts.open(path)?;
         Ok(Self {
             run_id,
             file: Mutex::new(file),

@@ -1,12 +1,14 @@
 //! HTTP surface: REST for actions, SSE for live run events.
 
+use parking_lot::Mutex;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -16,6 +18,7 @@ use boitata_orchestrator::{Executor, SqliteCheckpointer};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -24,10 +27,14 @@ use uuid::Uuid;
 use crate::events::ChannelAuditSink;
 use crate::state::{AppState, RunHandle, RunResult, RunStatus, RunSummary};
 
-/// Build the application router: the JSON/SSE API under `/api`, with the embedded
-/// web UI served for everything else (SPA fallback lives in `assets`).
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    // Only the `/api` surface is gated by the token; it's the part that can drive
+    // the shell/file/git agent. The embedded web UI (the SPA shell and its hashed
+    // asset bundle) carries no secrets and must load in a plain browser — a
+    // navigation can't send an `Authorization` header — so serving it behind the
+    // gate would 401 the very UI that binding non-loopback exists to expose. The
+    // UI's own `/api` calls still require the token.
+    let api = Router::new()
         .route("/api/runs", post(create_run).get(list_runs))
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/events", get(run_events))
@@ -36,8 +43,63 @@ pub fn router(state: AppState) -> Router {
         .route("/api/blueprints", get(list_blueprints))
         .route("/api/blueprints/{name}", get(get_blueprint))
         .route("/api/blueprints/{name}/source", get(get_blueprint_source))
+        // Cap request bodies so a client can't OOM the server by streaming a
+        // multi-GB JSON payload (axum 0.8 applies no default limit).
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // When an API token is configured, every `/api` request must carry it —
+        // gating the shell/file/git agent behind a shared secret (see
+        // `require_token`).
+        .layer(middleware::from_fn_with_state(state.clone(), require_token));
+
+    api.fallback(crate::assets::static_handler)
         .with_state(state)
-        .fallback(crate::assets::static_handler)
+}
+
+/// Largest accepted request body. A run task is plain text; 1 MiB is generous
+/// and bounds memory under a hostile client.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// Auth gate: when an API token is configured (`api_token` / `BOITATA_API_TOKEN`),
+/// every request must carry it as `Authorization: Bearer <token>`, or as
+/// `?token=<token>` (so browser `EventSource` streams, which can't set headers,
+/// can authenticate). With no token configured the API is open — intended for
+/// loopback/single-user use. The comparison is constant-time to avoid a timing
+/// oracle on the shared secret.
+async fn require_token(State(app): State<AppState>, request: Request, next: Next) -> Response {
+    let Some(expected) = app.config.resolve_api_token() else {
+        return next.run(request).await;
+    };
+    let header_token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer ").map(str::trim));
+    let query_token = request.uri().query().and_then(token_from_query);
+    let provided = header_token.or(query_token);
+    match provided {
+        Some(p) if constant_time_eq(p.as_bytes(), expected.as_bytes()) => next.run(request).await,
+        _ => ApiError::unauthorized().into_response(),
+    }
+}
+
+/// Extract the `token=<value>` query parameter (if present and non-empty).
+fn token_from_query(query: &str) -> Option<&str> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("token=").filter(|v| !v.is_empty()))
+}
+
+/// Byte-wise compare that does not short-circuit, so the time taken is
+/// independent of how many leading bytes match.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Request body for starting a run. `blueprint` is the *name* of one of the
@@ -88,6 +150,14 @@ async fn create_run(
         }));
     }
 
+    // Bound concurrent in-flight runs so a flood of requests can't exhaust the
+    // host or burn provider budget. The permit is held until the run finishes.
+    let permit = app
+        .run_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::service_unavailable("server is at its concurrent-run limit"))?;
+
     let id = Uuid::new_v4();
     let (tx, _) = broadcast::channel(1024);
     let history = Arc::new(Mutex::new(Vec::new()));
@@ -96,8 +166,8 @@ async fn create_run(
         task: req.task.clone(),
         blueprint: req.blueprint.clone(),
         started_at: chrono::Utc::now(),
-        status: std::sync::RwLock::new(RunStatus::Running),
-        result: std::sync::RwLock::new(None),
+        status: parking_lot::RwLock::new(RunStatus::Running),
+        result: parking_lot::RwLock::new(None),
         cancel: CancellationToken::new(),
         finished: CancellationToken::new(),
         tx,
@@ -106,7 +176,13 @@ async fn create_run(
     app.register_run(handle.clone());
     info!(%id, blueprint = ?req.blueprint, "run started");
 
-    tokio::spawn(run_job(app.clone(), handle, req.task, req.blueprint));
+    tokio::spawn(run_job(
+        app.clone(),
+        handle,
+        req.task,
+        req.blueprint,
+        permit,
+    ));
 
     Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))))
 }
@@ -124,11 +200,11 @@ struct FinishGuard {
 impl Drop for FinishGuard {
     fn drop(&mut self) {
         if !self.recorded {
-            // Best-effort and panic-proof: this runs on the run task's unwind
-            // path, so it must never `unwrap()` a (possibly poisoned) lock and
-            // double-panic — that would abort the process. Skipping the status
-            // write is acceptable; `finished` still fires below so SSE closes.
-            if let Ok(mut status) = self.handle.status.write() {
+            // Mark the run Failed if it never recorded an outcome. parking_lot
+            // locks never poison, so this can't panic on the unwind path; if the
+            // guard is somehow unavailable we still cancel `finished` below.
+            {
+                let mut status = self.handle.status.write();
                 *status = RunStatus::Failed {
                     error: Some("run task panicked".into()),
                 };
@@ -142,8 +218,15 @@ impl Drop for FinishGuard {
 /// The background task: assemble an agent or executor with a [`ChannelAuditSink`],
 /// run it under the handle's cancel token, then record the outcome. A
 /// [`FinishGuard`] ensures `finished` fires and the status leaves `Running` even
-/// if the run panics.
-async fn run_job(app: AppState, handle: Arc<RunHandle>, task: String, blueprint: Option<String>) {
+/// if the run panics. `_permit` is held for the run's duration, releasing the
+/// concurrent-run slot when the task ends.
+async fn run_job(
+    app: AppState,
+    handle: Arc<RunHandle>,
+    task: String,
+    blueprint: Option<String>,
+    _permit: OwnedSemaphorePermit,
+) {
     let mut guard = FinishGuard {
         handle: handle.clone(),
         recorded: false,
@@ -181,16 +264,22 @@ fn record_outcome(
         }
     };
     if let Ok(result) = outcome {
-        *handle.result.write().unwrap() = Some(result);
+        *handle.result.write() = Some(result);
     }
-    *handle.status.write().unwrap() = status;
+    *handle.status.write() = status;
     guard.recorded = true; // outcome recorded; Drop now only cancels `finished`
     info!(id = %handle.id, "run finished");
 }
 
 /// The background task for a resumed run: rebuild the executor and continue the
-/// blueprint from its persisted checkpoint, then record the outcome.
-async fn resume_job(app: AppState, handle: Arc<RunHandle>, name: String) {
+/// blueprint from its persisted checkpoint, then record the outcome. `_permit`
+/// releases the concurrent-run slot when the task ends.
+async fn resume_job(
+    app: AppState,
+    handle: Arc<RunHandle>,
+    name: String,
+    _permit: OwnedSemaphorePermit,
+) {
     let mut guard = FinishGuard {
         handle: handle.clone(),
         recorded: false,
@@ -312,13 +401,7 @@ fn blueprint_executor(
 /// runs recovered from the state database (e.g. after a restart), the latter
 /// reported as `suspended`. In-memory entries take precedence for a given id.
 async fn list_runs(State(app): State<AppState>) -> Json<Vec<RunSummary>> {
-    let mut runs: Vec<RunSummary> = app
-        .runs
-        .read()
-        .unwrap()
-        .values()
-        .map(|h| h.summary())
-        .collect();
+    let mut runs: Vec<RunSummary> = app.runs.read().values().map(|h| h.summary()).collect();
     let live: std::collections::HashSet<Uuid> = runs.iter().map(|r| r.id).collect();
 
     // Fold in resumable checkpoints not already represented by a live run.
@@ -350,10 +433,10 @@ async fn get_run(
     Path(id): Path<Uuid>,
 ) -> Result<Json<RunDetail>, ApiError> {
     let handle = app.get_run(id).ok_or_else(ApiError::not_found)?;
-    let events = handle.history.lock().unwrap().clone();
+    let events = handle.history.lock().clone();
     Ok(Json(RunDetail {
         summary: handle.summary(),
-        result: handle.result.read().unwrap().clone(),
+        result: handle.result.read().clone(),
         events,
     }))
 }
@@ -377,7 +460,7 @@ async fn resume_run(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     // A run already executing in memory must not be resumed concurrently.
     if let Some(handle) = app.get_run(id)
-        && matches!(*handle.status.read().unwrap(), RunStatus::Running)
+        && matches!(*handle.status.read(), RunStatus::Running)
     {
         return Err(ApiError::conflict("run is already running"));
     }
@@ -404,6 +487,14 @@ async fn resume_run(
         )));
     }
 
+    // Bound concurrent runs (same as create_run). Acquired here so a conflict
+    // below releases the slot via drop.
+    let permit = app
+        .run_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::service_unavailable("server is at its concurrent-run limit"))?;
+
     // Rebuild the run handle under the same id with fresh event plumbing and a new
     // cancel token, then continue it in the background.
     let (tx, _) = broadcast::channel(1024);
@@ -413,17 +504,23 @@ async fn resume_run(
         task: record.task.clone(),
         blueprint: Some(name.clone()),
         started_at: chrono::Utc::now(),
-        status: std::sync::RwLock::new(RunStatus::Running),
-        result: std::sync::RwLock::new(None),
+        status: parking_lot::RwLock::new(RunStatus::Running),
+        result: parking_lot::RwLock::new(None),
         cancel: CancellationToken::new(),
         finished: CancellationToken::new(),
         tx,
         history,
     });
-    app.register_run(handle.clone());
+    // Atomically claim the id: the running-check above and this insert are not a
+    // single critical section, so two concurrent resumes could both pass it.
+    // `try_register_run` closes that window — the second caller gets a conflict
+    // instead of driving the same checkpoint twice.
+    if !app.try_register_run(handle.clone()) {
+        return Err(ApiError::conflict("run is already running"));
+    }
     info!(%id, blueprint = %name, "run resumed");
 
-    tokio::spawn(resume_job(app.clone(), handle, name));
+    tokio::spawn(resume_job(app.clone(), handle, name, permit));
     Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))))
 }
 
@@ -492,7 +589,7 @@ async fn run_events(
     // Subscribe before snapshotting history so no event slips through the gap;
     // any overlap is removed by the `seq` dedupe below.
     let mut rx = handle.tx.subscribe();
-    let history = handle.history.lock().unwrap().clone();
+    let history = handle.history.lock().clone();
     let finished = handle.finished.clone();
     let already_finished = finished.is_cancelled();
 
@@ -571,6 +668,12 @@ impl ApiError {
             message: message.into(),
         }
     }
+    fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "missing or invalid API token".into(),
+        }
+    }
     fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -580,6 +683,12 @@ impl ApiError {
     fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+    fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.into(),
         }
     }
@@ -621,6 +730,31 @@ mod tests {
         AppState::new(config, provider, tools, policy, blueprints, store)
     }
 
+    /// Like [`test_state`], but with the HTTP API gated by `token` (so auth can be
+    /// exercised without touching real provider keys).
+    async fn state_with_token(token: &str) -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boitata.toml");
+        std::fs::write(
+            &path,
+            format!("provider = \"ollama\"\nmodel = \"llama3\"\napi_token = \"{token}\"\n"),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let provider = runtime::build_provider(&config).unwrap();
+        let tools = runtime::build_tools(&config).await.unwrap();
+        let policy = runtime::build_policy(&config).unwrap();
+        let store = boitata_store::Store::open_in_memory().unwrap();
+        AppState::new(
+            config,
+            provider,
+            tools,
+            policy,
+            std::collections::BTreeMap::new(),
+            store,
+        )
+    }
+
     async fn body_json(resp: Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -637,6 +771,84 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await, json!([]));
+    }
+
+    #[tokio::test]
+    async fn api_token_gates_requests_when_configured() {
+        let app = router(state_with_token("s3cret").await);
+        // Missing token → 401.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/runs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // Wrong token → 401.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/api/runs")
+                    .header("authorization", "Bearer nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // Correct token → 200 (list_runs, which doesn't spawn a run).
+        let resp = app
+            .oneshot(
+                Request::get("/api/runs")
+                    .header("authorization", "Bearer s3cret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn token_query_param_authenticates_sse() {
+        // EventSource (browser) can't set headers; it must use ?token=.
+        let app = router(state_with_token("s3cret").await);
+        let resp = app
+            .oneshot(
+                Request::get("/api/runs?token=s3cret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn no_token_configured_leaves_api_open() {
+        // Default (no token): requests pass through (loopback single-user model).
+        let app = router(test_state().await);
+        let resp = app
+            .oneshot(Request::get("/api/runs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn oversized_body_is_rejected() {
+        let app = router(test_state().await);
+        let big = "a".repeat(MAX_BODY_BYTES + 1);
+        let body = format!("{{\"task\":\"{big}\"}}");
+        let resp = app
+            .oneshot(
+                Request::post("/api/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     /// Insert a checkpoint row directly, to exercise the resume/listing paths

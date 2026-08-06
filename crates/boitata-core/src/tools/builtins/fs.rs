@@ -365,10 +365,6 @@ impl Tool for FileEditTool {
                 }
             })?;
 
-            // Write atomically: write a sibling temp file then rename over the
-            // original, so a failure mid-write (disk full, crash) never leaves
-            // the file truncated. The temp lives in the same directory so the
-            // rename stays on one filesystem.
             let tmp = confined.with_file_name(format!(
                 ".{}.boitata-{}.tmp",
                 confined
@@ -377,13 +373,30 @@ impl Tool for FileEditTool {
                     .unwrap_or_default(),
                 uuid::Uuid::new_v4()
             ));
-            fs::write(&tmp, &new_content).map_err(|e| {
-                ToolError::ExecutionFailed(format!("failed to write temp file: {e}"))
-            })?;
-            // The temp file is created with default permissions; carry over the
-            // original file's mode so an edit doesn't silently drop, say, the
-            // executable bit. Best-effort — a failure here shouldn't abort a
-            // successful edit.
+            // Write atomically: create a sibling temp file owner-only (it holds
+            // the file's full new contents, which may be secret) then rename over
+            // the original, so a failure mid-write (disk full, crash) never leaves
+            // the file truncated and the contents are never briefly world-readable.
+            // The temp lives in the same directory so the rename stays on one fs.
+            {
+                use std::io::Write;
+                let mut opts = fs::OpenOptions::new();
+                opts.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    opts.mode(0o600);
+                }
+                let mut file = opts.open(&tmp).map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to write temp file: {e}"))
+                })?;
+                file.write_all(new_content.as_bytes()).map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to write temp file: {e}"))
+                })?;
+            }
+            // Carry over the original file's mode so an edit doesn't silently
+            // drop, say, the executable bit. Best-effort — a failure here
+            // shouldn't abort a successful edit.
             if let Ok(meta) = fs::metadata(&confined) {
                 let _ = fs::set_permissions(&tmp, meta.permissions());
             }

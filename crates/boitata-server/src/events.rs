@@ -6,8 +6,8 @@
 //! SSE subscribers. Auditing is best-effort, so a full channel or absent
 //! subscribers never fails a run.
 
+use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use boitata_core::audit::{AuditEvent, AuditSink};
@@ -61,10 +61,11 @@ impl AuditSink for ChannelAuditSink {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let ev = RunEvent { seq, event };
         // Clone for the history copy outside the lock so the critical section is
-        // just the push/trim. Best-effort: a poisoned lock or a send with no live
-        // subscribers must never break the run.
+        // just the push/trim. Best-effort: a send with no live subscribers must
+        // never break the run (parking_lot locks never poison).
         let for_history = ev.clone();
-        if let Ok(mut history) = self.history.lock() {
+        {
+            let mut history = self.history.lock();
             history.push(for_history);
             if history.len() > MAX_HISTORY + TRIM_BATCH {
                 history.drain(0..TRIM_BATCH);
@@ -95,7 +96,7 @@ mod tests {
         sink.record(run_started());
         sink.record(run_started());
 
-        let seqs: Vec<u64> = history.lock().unwrap().iter().map(|e| e.seq).collect();
+        let seqs: Vec<u64> = history.lock().iter().map(|e| e.seq).collect();
         assert_eq!(seqs, vec![0, 1]);
     }
 
@@ -123,7 +124,7 @@ mod tests {
             sink.record(run_started());
         }
 
-        let buf = history.lock().unwrap();
+        let buf = history.lock();
         assert!(buf.len() <= MAX_HISTORY + TRIM_BATCH, "buffer not bounded");
         // Oldest events were trimmed; the last recorded seq is retained.
         assert_eq!(buf.last().unwrap().seq, (total - 1) as u64);
@@ -137,6 +138,6 @@ mod tests {
         let sink = ChannelAuditSink::new(tx, history.clone());
 
         sink.record(run_started()); // must not panic
-        assert_eq!(history.lock().unwrap().len(), 1);
+        assert_eq!(history.lock().len(), 1);
     }
 }

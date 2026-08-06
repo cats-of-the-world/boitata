@@ -10,7 +10,7 @@ mod assets;
 mod events;
 mod state;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use boitata_core::config::Config;
 use boitata_core::runtime;
 use clap::Parser;
@@ -89,21 +89,32 @@ async fn main() -> anyhow::Result<()> {
     info!("State database: {db_path}");
 
     let state = AppState::new(config, provider, tools, policy, blueprints, store);
+    let token_configured = state.config.resolve_api_token().is_some();
     let app = api::router(state);
 
     let listener = tokio::net::TcpListener::bind(&args.addr)
         .await
         .with_context(|| format!("failed to bind {}", args.addr))?;
-    // The server has no auth and drives an agent with shell/file/git tools, so
-    // binding to a non-loopback address exposes it to the whole network.
-    if !listener
+    // The server drives an agent with shell/file/git tools. Loopback is the
+    // default and safe; binding a non-loopback address exposes it to the
+    // network, so require an API token then (refuse to start rather than warn,
+    // since a warning is easy to miss and the exposure is total).
+    let loopback = listener
         .local_addr()
         .map(|a| a.ip().is_loopback())
-        .unwrap_or(false)
-    {
-        tracing::warn!(
-            "listening on non-loopback address {} — there is no authentication; \
-             put it behind a trusted network or an authenticating reverse proxy",
+        .unwrap_or(false);
+    if !loopback && !token_configured {
+        bail!(
+            "refusing to bind non-loopback address `{}` without authentication: the \
+             server has no auth and can run shell/file/git commands. Set an API token \
+             (`api_token` in the config or the BOITATA_API_TOKEN env var) to expose it \
+             safely, or bind to 127.0.0.1.",
+            args.addr
+        );
+    }
+    if !loopback {
+        info!(
+            "listening on non-loopback address {} — API requests require a bearer token",
             args.addr
         );
     }

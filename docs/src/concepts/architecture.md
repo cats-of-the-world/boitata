@@ -8,56 +8,48 @@ dependencies point inward toward `boitata-core`.
 ```
 crates/
   boitata-core/          # Config, providers, tools, runtime, audit
-  boitata-agent/         # The agent loop (LLM + tools) + the ACP agent server
-  boitata-acp/           # Agent Client Protocol: serve an agent / drive one
-  boitata-orchestrator/  # Blueprint graphs over the agent (+ sandbox nodes)
+  boitata-agent/         # The agent loop (LLM + tools) and the ACP agent server
+  boitata-acp/           # Agent Client Protocol: serve an agent or drive one
+  boitata-orchestrator/  # Blueprint graphs over the agent (plus sandbox nodes)
   boitata-cli/           # The `boitata` binary
-  boitata-server/        # HTTP/SSE server + embedded web UI
+  boitata-server/        # HTTP/SSE server and embedded web UI
 ```
 
 ## Dependency flow
 
 ```
- ┌─────────────┐   ┌──────────────┐
- │  CLI / Web  │   │  HTTP Server │        ← interfaces
- └──────┬──────┘   └──────┬───────┘
-        │                 │
-        └────────┬────────┘
-                 │
-        ┌────────▼─────────┐
-        │   Orchestrator   │             ← blueprints
-        │   (blueprints)   │
-        └────────┬─────────┘
-                 │
-        ┌────────▼─────────┐
-        │      Agent       │             ← agent loop
-        │  (LLM + tools)   │
-        └────────┬─────────┘
-                 │
- ┌───────────────┼───────────────┐
- │               │               │
- ▼               ▼               ▼
-Providers      Tools            Audit        ← core
-(Anthropic,    (file, cargo,    (JSONL
- OpenAI,        git, search,    event log)
- Ollama)        MCP …)
+  CLI / Web        HTTP Server        (interfaces)
+       \               /
+        \             /
+         Orchestrator                (blueprints)
+              |
+            Agent                    (LLM + tools)
+              |
+    +---------+---------+
+    |         |         |
+Providers   Tools     Audit          (core)
+(Anthropic, (file,    (JSONL
+ OpenAI,     cargo,    event log)
+ Ollama)     git,
+             search,
+             MCP)
 ```
 
 ## The crates
 
 ### `boitata-core`
 
-The foundation. Holds everything the other crates build on:
+The foundation. It holds everything the other crates build on:
 
-- **Config** — TOML loading, env-var overrides, and manual `Debug` impls that
-  redact secrets (`api_key`, MCP `auth_token`).
-- **Providers** — the `Provider` trait and the Anthropic, OpenAI, and Ollama
+- Config: TOML loading, env-var overrides, and manual `Debug` impls that redact
+  secrets (`api_key`, MCP `auth_token`).
+- Providers: the `Provider` trait and the Anthropic, OpenAI, and Ollama
   implementations.
-- **Tools** — the `ToolRegistry`, the built-in tools, and the `ToolPolicy` that
-  gates every call.
-- **Runtime** — the shared assembly (`boitata_core::runtime`) that builds the
+- Tools: the `ToolRegistry`, the built-in tools, and the `ToolPolicy` that gates
+  every call.
+- Runtime: the shared assembly (`boitata_core::runtime`) that builds the
   provider, tools, and policy once so the CLI and server share identical setup.
-- **Audit** — the append-only JSONL event log.
+- Audit: the append-only JSONL event log.
 
 ### `boitata-agent`
 
@@ -65,39 +57,39 @@ The core execution engine. It accepts a task description, then iterates through
 LLM calls and tool executions while maintaining a token-budgeted conversation
 context, and returns a structured result.
 
-### `boitata-agent`
-
-Also ships the `boitata-agent` binary: the agent exposed as an **ACP server** over
-TCP, for running the agent inside a sandbox. See
+It also ships the `boitata-agent` binary: the agent exposed as an ACP server
+over TCP, for running the agent inside a sandbox. See
 [Sandboxed Execution](./sandboxed-execution.md).
 
 ### `boitata-acp`
 
 The [Agent Client Protocol](https://agentclientprotocol.com/) integration: a
-`serve()` that runs an agent as an ACP server and a `run_prompt()` client the
-orchestrator uses to drive an agent running elsewhere. Boitata's audit events ride
-inside the protocol's message chunks, so the existing audit/SSE stream is unchanged.
+`serve()` that runs an agent as an ACP server, and a `run_prompt()` client the
+orchestrator uses to drive an agent running elsewhere. Boitata's audit events
+ride inside the protocol's message chunks, so the existing audit and SSE stream
+is unchanged.
 
 ### `boitata-orchestrator`
 
-The blueprint system. Compiles a YAML blueprint into a typed graph of `agent`,
-`tool`, `script`, `human`, and **sandbox** (`provision` / `checkout` / `exec` /
-`agent_sandbox`) nodes, then executes it with parallel super-steps, in-memory
-checkpointing, and retry. It talks to sandboxes through a `Sandbox` backend trait
-(Docker today, Firecracker planned). See [Blueprints](../reference/blueprints.md)
-and [Sandboxed Execution](./sandboxed-execution.md).
+The blueprint system. It compiles a YAML blueprint into a typed graph of
+`agent`, `tool`, `script`, `human`, and sandbox (`provision` / `checkout` /
+`exec` / `agent_sandbox`) nodes, then executes it with parallel super-steps,
+in-memory checkpointing, and retry. It talks to sandboxes through a `Sandbox`
+backend trait (Docker today, Firecracker planned). See
+[Blueprints](../reference/blueprints.md) and
+[Sandboxed Execution](./sandboxed-execution.md).
 
 ### `boitata-cli`
 
-The `boitata` binary. Parses arguments, loads config via `boitata_core::runtime`,
-and either runs a single task or a blueprint — locally or scheduled on a remote
-server (`--remote`).
+The `boitata` binary. It parses arguments, loads config via
+`boitata_core::runtime`, and either runs a single task or a blueprint, locally
+or scheduled on a remote server (`--remote`).
 
 ### `boitata-server`
 
-An HTTP/SSE backend with an embedded web UI. Reuses `boitata_core::runtime` to
-build the provider, tools, and policy once, then serves them to concurrent runs.
-See [Server & Web UI](../interfaces/server.md).
+An HTTP/SSE backend with an embedded web UI. It reuses `boitata_core::runtime`
+to build the provider, tools, and policy once, then serves them to concurrent
+runs. See [Server & Web UI](../interfaces/server.md).
 
 ## One assembly, many front-ends
 

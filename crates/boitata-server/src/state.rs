@@ -6,9 +6,10 @@
 //! [`RunResult`]. Restarting the server forgets past runs; persistence is a later
 //! step.
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use boitata_agent::TaskResult;
 use boitata_core::config::Config;
@@ -18,7 +19,7 @@ use boitata_orchestrator::{State as BlueprintState, Status as BlueprintStatus};
 use boitata_store::Store;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use tokio::sync::broadcast;
+use tokio::sync::{Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -43,6 +44,10 @@ pub struct AppState {
     /// interrupted run can be resumed (`POST /api/runs/{id}/resume`), including
     /// after a server restart when it's no longer in the in-memory registry.
     pub store: Store,
+    /// Bounded pool of "run slots" capping how many runs execute at once, so a
+    /// flood of `POST /api/runs` can't spawn unbounded concurrent agent/executor
+    /// tasks (and burn provider budget). Each live run holds one permit.
+    pub run_slots: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -62,11 +67,12 @@ impl AppState {
             runs: Arc::new(RwLock::new(HashMap::new())),
             blueprints: Arc::new(blueprints),
             store,
+            run_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_RUNS)),
         }
     }
 
     pub fn get_run(&self, id: Uuid) -> Option<Arc<RunHandle>> {
-        self.runs.read().unwrap().get(&id).cloned()
+        self.runs.read().get(&id).cloned()
     }
 
     /// Register a run, evicting the oldest *finished* runs once the registry
@@ -74,24 +80,53 @@ impl AppState {
     /// In-flight runs are never evicted. (v1 is in-memory only; the target model
     /// moves execution into ephemeral containers and replaces this registry.)
     pub fn register_run(&self, handle: Arc<RunHandle>) {
-        let mut runs = self.runs.write().unwrap();
-        runs.insert(handle.id, handle);
-        if runs.len() > MAX_RUNS {
-            let mut finished: Vec<(Uuid, DateTime<Utc>)> = runs
-                .values()
-                .filter(|h| !matches!(*h.status.read().unwrap(), RunStatus::Running))
-                .map(|h| (h.id, h.started_at))
-                .collect();
-            finished.sort_by_key(|&(_, started)| started); // oldest first
-            for (id, _) in finished.into_iter().take(runs.len() - MAX_RUNS) {
-                runs.remove(&id);
-            }
+        let mut runs = self.runs.write();
+        insert_evicting(&mut runs, handle);
+    }
+
+    /// Atomically register a run only if no *running* run already owns its id.
+    /// Closes the check-then-spawn window in `resume_run`: without this, two
+    /// concurrent resumes of the same checkpoint both observed "not running",
+    /// then both proceeded to drive it (double provider calls, double container
+    /// provisioning, corrupted checkpoint). Returns `false` (without inserting)
+    /// when a running run already holds the id.
+    pub fn try_register_run(&self, handle: Arc<RunHandle>) -> bool {
+        let mut runs = self.runs.write();
+        if let Some(existing) = runs.get(&handle.id)
+            && matches!(*existing.status.read(), RunStatus::Running)
+        {
+            return false;
+        }
+        insert_evicting(&mut runs, handle);
+        true
+    }
+}
+
+/// Insert a run and, once the registry exceeds [`MAX_RUNS`], evict the oldest
+/// *finished* runs so a long-lived server's memory stays bounded. In-flight runs
+/// are never evicted. Shared by [`AppState::register_run`] (unconditional) and
+/// [`AppState::try_register_run`] (conditional), so eviction stays consistent.
+fn insert_evicting(runs: &mut HashMap<Uuid, Arc<RunHandle>>, handle: Arc<RunHandle>) {
+    runs.insert(handle.id, handle);
+    if runs.len() > MAX_RUNS {
+        let mut finished: Vec<(Uuid, DateTime<Utc>)> = runs
+            .values()
+            .filter(|h| !matches!(*h.status.read(), RunStatus::Running))
+            .map(|h| (h.id, h.started_at))
+            .collect();
+        finished.sort_by_key(|&(_, started)| started); // oldest first
+        for (id, _) in finished.into_iter().take(runs.len() - MAX_RUNS) {
+            runs.remove(&id);
         }
     }
 }
 
 /// Upper bound on retained runs before finished ones are evicted oldest-first.
 const MAX_RUNS: usize = 1000;
+
+/// How many runs may execute concurrently; further `POST /api/runs` are
+/// rejected with 503. Bounds resource use under load (see `run_slots`).
+const MAX_CONCURRENT_RUNS: usize = 16;
 
 /// Lifecycle state of a run, tagged for JSON (`{"state": "running"}`).
 #[derive(Debug, Clone, Serialize)]
@@ -133,7 +168,7 @@ impl RunHandle {
             id: self.id,
             task: self.task.clone(),
             blueprint: self.blueprint.clone(),
-            status: self.status.read().unwrap().clone(),
+            status: self.status.read().clone(),
             started_at: self.started_at,
         }
     }

@@ -8,7 +8,7 @@
 
 use super::{
     Chunk, CompletionRequest, CompletionResponse, MessageContent, MessageRole, Provider,
-    ProviderError, ProviderResult, ToolCall, ToolContent, ToolDefinition, Usage,
+    ProviderError, ProviderResult, ToolCall, ToolContent, ToolDefinition, Usage, http_client,
 };
 use async_trait::async_trait;
 use reqwest::Client;
@@ -22,13 +22,23 @@ use tokio_stream::wrappers::ReceiverStream;
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
 /// Anthropic Claude provider
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
     model: String,
     max_tokens: usize,
     base_url: String,
+}
+
+impl std::fmt::Debug for AnthropicProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the API key (mirrors `Config`'s redaction discipline).
+        f.debug_struct("AnthropicProvider")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AnthropicProvider {
@@ -40,7 +50,7 @@ impl AnthropicProvider {
     /// Create with custom base URL
     pub fn with_config(api_key: String, model: String, base_url: Option<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: http_client(),
             api_key,
             model,
             // Output (generation) token budget, not the context window size.

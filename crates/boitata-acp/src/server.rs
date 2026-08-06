@@ -10,7 +10,7 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{Agent, ByteStreams};
 use boitata_core::audit::{AuditEvent, AuditSink};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
 
@@ -19,16 +19,30 @@ use crate::{PromptRunner, mapping};
 /// Monotonic source of session ids (one session per prompt turn here).
 static SESSION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Serve `runner` over ACP, accepting one client connection at a time on
-/// `listener`. Returns when the listener errors; each accepted connection runs
-/// until the client disconnects.
+/// Cap on simultaneous ACP connections. Each holds a socket and an audit
+/// channel; bounding them stops a flood of held-open peers from exhausting the
+/// host. Waiting peers queue in the OS accept backlog.
+const MAX_CONNECTIONS: usize = 64;
+
+/// Serve `runner` over ACP. Each accepted connection runs on its own task so a
+/// single slow/stuck peer can't head-of-line block every other client; a bounded
+/// semaphore caps concurrency (backpressure pauses `accept` when full). Returns
+/// when the listener errors.
 pub async fn serve(listener: TcpListener, runner: Arc<dyn PromptRunner>) -> anyhow::Result<()> {
+    let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
         let (stream, peer) = listener.accept().await?;
-        tracing::info!("ACP client connected: {peer}");
-        if let Err(e) = handle_connection(stream, runner.clone()).await {
-            tracing::warn!("ACP connection with {peer} ended: {e:#}");
-        }
+        // Backpressure: when at capacity, await a permit before accepting more,
+        // so live (in-flight) connections — not spawned tasks — are bounded.
+        let permit = slots.clone().acquire_owned().await?;
+        let runner = runner.clone();
+        tokio::spawn(async move {
+            let _permit = permit; // released when the connection task ends
+            tracing::info!("ACP client connected: {peer}");
+            if let Err(e) = handle_connection(stream, runner).await {
+                tracing::warn!("ACP connection with {peer} ended: {e:#}");
+            }
+        });
     }
 }
 

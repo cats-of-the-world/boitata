@@ -19,6 +19,10 @@ const API_KEY_ENV: &str = "BOITATA_API_KEY";
 const PROVIDER_ENV: &str = "BOITATA_PROVIDER";
 const MODEL_ENV: &str = "BOITATA_MODEL";
 const BASE_URL_ENV: &str = "BOITATA_BASE_URL";
+/// Shared secret required by `boitata-server` on every API request when set
+/// (sent as `Authorization: Bearer <token>`). Lets an operator expose the server
+/// beyond loopback without leaving the shell/file/git agent wide open.
+const API_TOKEN_ENV: &str = "BOITATA_API_TOKEN";
 /// Default config file name, looked up in the current directory.
 const DEFAULT_CONFIG_FILE: &str = "boitata.toml";
 
@@ -102,6 +106,12 @@ pub struct Config {
     /// defaults to `boitata.db` in the working directory.
     #[serde(default)]
     pub state_db: Option<String>,
+    /// Shared secret gating the HTTP API. When set, every `/api` request must
+    /// carry it as `Authorization: Bearer <api_token>` (or `?token=` for SSE).
+    /// When unset (default) the API is open — intended for local loopback use.
+    /// May also be supplied via `BOITATA_API_TOKEN`.
+    #[serde(default)]
+    pub api_token: Option<String>,
 }
 
 /// A single MCP server. The transport is inferred from which field is set:
@@ -192,6 +202,7 @@ impl std::fmt::Debug for Config {
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .field("base_url", &self.base_url)
             .field("max_tokens", &self.max_tokens)
+            .field("api_token", &self.api_token.as_ref().map(|_| "***"))
             .field("max_iterations", &self.max_iterations)
             .field("system_prompt", &self.system_prompt)
             .field("audit_log", &self.audit_log)
@@ -270,6 +281,15 @@ impl Config {
     /// (e.g. `https://api.z.ai/api/paas/v4/chat/completions` for a z.ai endpoint).
     pub fn resolve_base_url(&self) -> Option<String> {
         env_override(BASE_URL_ENV).or_else(|| self.base_url.clone())
+    }
+
+    /// The shared API secret: `BOITATA_API_TOKEN` if set, otherwise the file
+    /// value. Trimmed; a blank result is treated as absent (no auth enforced).
+    pub fn resolve_api_token(&self) -> Option<String> {
+        env_override(API_TOKEN_ENV)
+            .or_else(|| self.api_token.clone())
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
     }
 }
 
@@ -399,11 +419,14 @@ mod tests {
             blueprint_max_steps: None,
             blueprint_max_retries: None,
             state_db: None,
+            api_token: Some("api-token-secret".to_string()),
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("super-secret-key"), "{rendered}");
         assert!(!rendered.contains("super-secret-token"), "{rendered}");
         assert!(!rendered.contains("hdr-secret"), "{rendered}");
+        // The api_token must also be redacted.
+        assert!(!rendered.contains("api-token-secret"), "{rendered}");
         // Non-secret metadata is still visible for debugging.
         assert!(rendered.contains("X-Api-Key"), "{rendered}");
         assert!(rendered.contains("glm-4.6"), "{rendered}");

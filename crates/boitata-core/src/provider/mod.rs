@@ -9,14 +9,22 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 
 use async_trait::async_trait;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-/// Configuration for a provider
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderConfig {
-    pub api_key: String,
-    pub base_url: Option<String>,
-    pub model: String,
+/// Build a `reqwest` client that does **not** follow redirects.
+///
+/// Provider endpoints are single, operator-configured hosts. Silently following
+/// a redirect would resend credentials to whatever host the redirect points at:
+/// reqwest strips `Authorization` on cross-host redirects, but it does **not**
+/// strip custom headers, so an Anthropic `x-api-key` (or any MCP custom header)
+/// would leak to the redirect target. An authenticated client to a known API
+/// has no reason to follow redirects, so disable them outright.
+pub fn http_client() -> Client {
+    Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("building a reqwest client with redirects disabled cannot fail")
 }
 
 /// Request for completion

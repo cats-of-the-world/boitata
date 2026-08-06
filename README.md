@@ -1,15 +1,16 @@
 # Boitata
 
-> A fire serpent from Brazilian folklore that protects the forest and brings light to darkness.
+> A fire serpent from Brazilian folklore that guards the forest.
 
-**Boitata** is a one-shot, end-to-end coding agent inspired by Stripe's
+Boitata is a one-shot, end-to-end coding agent written in Rust. It is inspired
+by Stripe's
 [Minions](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents-part-1)
-and Block's [Goose](https://github.com/block/goose). Built in Rust, it enables
-unattended task execution with minimal human intervention.
+and Block's [Goose](https://github.com/block/goose), and it runs tasks
+unattended with little human input.
 
-Give it a task in plain language and it plans, reads and edits files, runs
+Give it a task in plain language. It plans, reads and edits files, runs
 commands, and iterates against the compiler and test suite until the work is
-done — determinism first, fully auditable.
+done. Every run is fully auditable.
 
 ## Quick start
 
@@ -27,8 +28,7 @@ export BOITATA_API_KEY="your-key"
 ## Documentation
 
 The full documentation is an [mdBook][book] published as a GitHub Pages site:
-
-**➜ [Read the book][pages]**
+[read the book][pages].
 
 You can also browse the sources in [`docs/src/`](./docs/src) or build it locally:
 
@@ -49,16 +49,16 @@ mdbook serve docs/      # live preview at http://localhost:3000
 
 ## Highlights
 
-- **Unattended runs** — a task goes in, a result comes out.
-- **Determinism first** — leans on `cargo`, `rg`, and `git` instead of the LLM.
-- **Auditable** — every run appends a structured JSONL event log.
-- **Blueprints** — agent/tool/script/human graphs with retry and verify loops.
-- **Sandboxed execution** — provision a container, clone the code, and run the
-  agent inside it over the [Agent Client Protocol](https://agentclientprotocol.com/)
+- Unattended runs: a task goes in, a result comes out.
+- Determinism first: leans on `cargo`, `rg`, and `git` instead of the LLM.
+- Auditable: every run appends a structured JSONL event log.
+- Blueprints: agent/tool/script/human graphs with retry and verify loops.
+- Sandboxed execution: provision a container, clone the code, and run the agent
+  inside it over the [Agent Client Protocol](https://agentclientprotocol.com/)
   (Firecracker microVMs next).
-- **MCP** — connect any [Model Context Protocol](https://modelcontextprotocol.io)
+- MCP: connect any [Model Context Protocol](https://modelcontextprotocol.io)
   server.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).
