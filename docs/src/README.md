@@ -1,6 +1,7 @@
 # Boitata
 
-To understand more the reasoning on the project read my blog post about it: https://www.elias.sh/posts/i-vibe-coded
+To understand more the reasoning on the project read [my blog post about it](https://www.elias.sh/posts/i-vibe-coded
+).
 
 Boitata is a one-shot, end-to-end coding agent written in Rust. It is inspired
 by Stripe's
